@@ -1,8 +1,8 @@
 build:
-	make -C src
+	make -C extension
 
 clean:
-	make -C src clean
+	make -C extension clean
 
 install:
 	sudo apt update
