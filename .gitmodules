@@ -7,3 +7,6 @@
 [submodule "kernel-module/nvidia-module"]
 	path = kernel-module/nvidia-module
 	url = https://github.com/eunomia-bpf/gpu_ext-kernel-modules
+[submodule "/home/yunwei37/workspace/gpu/gpu_ext/docs/gpu-ext-paper"]
+	path = /home/yunwei37/workspace/gpu/gpu_ext/docs/gpu-ext-paper
+	url = https://github.com/yunwei37/gpu-ext-paper
