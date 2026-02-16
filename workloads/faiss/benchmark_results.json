@@ -1,0 +1,17 @@
+[
+  {
+    "name": "SIFT10M-IVF4096",
+    "mode": "gpu",
+    "dataset": "SIFT10M",
+    "index": "IVF4096,Flat",
+    "parameters": [
+      "-nprobe",
+      "1,4,16,64"
+    ],
+    "success": true,
+    "elapsed_time": 5.063932180404663,
+    "metrics": {},
+    "timestamp": "2025-11-21T16:42:38.419087",
+    "raw_output": "Preparing dataset SIFT10M\nsizes: B (10000000, 128) Q (10000, 128) T (100000000, 128) gt (10000, 1000)\ncachefiles:\nNone\n/tmp/bench_gpu_1bn/cent_SIFT10M_IVF4096.npy\n/tmp/bench_gpu_1bn/SIFT10M_IVF4096,Flat.index\npreparing resources for 1 GPUs\nload /tmp/bench_gpu_1bn/SIFT10M_IVF4096,Flat.index\nCPU index contains 10000000 vectors, move to GPU\ncopying loaded index to GPUs\nmove to GPU done in 1.320 s\nsearch...\n\n0/10000 (0.005 s)      probe=1  : 0.045 s 1-R@1: 0.4045 1-R@10: 0.4045 \n\n0/10000 (0.003 s)      probe=4  : 0.038 s 1-R@1: 0.7182 1-R@10: 0.7182 \n\n0/10000 (0.001 s)      probe=16 : 0.129 s 1-R@1: 0.9212 1-R@10: 0.9212 \n\n0/10000 (0.004 s)      probe=64 : 0.491 s 1-R@1: 0.9903 1-R@10: 0.9903 \n"
+  }
+]

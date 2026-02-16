@@ -1,0 +1,52 @@
+# Datasets
+datasets/
+*.csv
+*.txt
+!benchmarks/sonnet.txt
+!requirements/*.txt
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.env
+vllm_env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+results/
+
+# Cache
+.cache/
+*.cache
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+
+# Model weights
+models/
+checkpoints/
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# Benchmark outputs
+benchmark_results/
+*.out
+*.err

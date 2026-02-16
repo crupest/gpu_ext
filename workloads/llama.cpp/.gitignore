@@ -1,0 +1,60 @@
+# Build directories
+build/
+build-*/
+bin/
+lib/
+/schedcp_workloads.json
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Compiled binaries
+llama-cli
+llama-server
+llama-bench
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dataset files
+datasets/
+*.gguf
+*.ggml
+*.bin
+
+# Generated documentation
+*.html.gz.hpp
+*.html.hpp
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+server_logs.stderr
+server_logs.stdout
+**/server_logs.stderr
+**/server_logs.stdout
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store

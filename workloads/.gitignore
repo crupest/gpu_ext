@@ -1,0 +1,32 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+*.so
+*.o
+*.a
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Large datasets (download via scripts)
+datasets/
+
+# Model weights
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+
+# Logs
+*.log

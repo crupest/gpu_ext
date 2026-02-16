@@ -10,3 +10,9 @@
 [submodule "/home/yunwei37/workspace/gpu/gpu_ext/docs/gpu-ext-paper"]
 	path = /home/yunwei37/workspace/gpu/gpu_ext/docs/gpu-ext-paper
 	url = https://github.com/yunwei37/gpu-ext-paper
+[submodule "workloads/faiss/faiss"]
+	path = workloads/faiss/faiss
+	url = https://github.com/eunomia-bpf/faiss
+[submodule "workloads/llama.cpp/llama.cpp"]
+	path = workloads/llama.cpp/llama.cpp
+	url = https://github.com/eunomia-bpf/llama.cpp

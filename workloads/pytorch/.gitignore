@@ -1,0 +1,39 @@
+# PyTorch source and build artifacts
+pytorch/
+build/
+*.so
+*.o
+*.a
+*.pyc
+__pycache__/
+/fine-tune-hf/out-qwen2.5-1.5b-qlora
+# Python virtual environments
+venv/
+env/
+.venv/
+
+# Compiled binaries
+*.out
+*.exe
+
+# Data and models
+data/
+models/
+checkpoints/
+
+# Logs and results
+*.log
+results/
+benchmark_results/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Distribution/packaging
+dist/
+*.egg-info/
+results_*.json
