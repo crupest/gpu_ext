@@ -24,6 +24,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKLOADS_DIR = SCRIPT_DIR.parent
+from common import cleanup_gpu
 
 
 def run_trial(command: str, trial_num: int, results_dir: Path) -> dict:
@@ -54,17 +55,6 @@ def run_trial(command: str, trial_num: int, results_dir: Path) -> dict:
     else:
         print(f"  Trial {trial_num}: no output file generated", file=sys.stderr)
         return None
-
-
-def cleanup_gpu():
-    """Kill stale GPU processes."""
-    cleanup_script = WORKLOADS_DIR / "cleanup_gpu.py"
-    if cleanup_script.exists():
-        subprocess.run(
-            [sys.executable, str(cleanup_script)],
-            capture_output=True,
-        )
-        time.sleep(2)
 
 
 def main():

@@ -19,19 +19,11 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKLOAD_DIR = SCRIPT_DIR.parent
 WORKLOADS_DIR = WORKLOAD_DIR.parent
+sys.path.insert(0, str(WORKLOADS_DIR / "scripts"))
+from common import cleanup_gpu
+
 LLAMA_BENCH = WORKLOAD_DIR / "build" / "bin" / "llama-bench"
 DEFAULT_MODEL = Path.home() / ".cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf"
-
-
-def cleanup_gpu():
-    """Kill stale GPU processes."""
-    cleanup_script = WORKLOADS_DIR / "cleanup_gpu.py"
-    if cleanup_script.exists():
-        subprocess.run(
-            [sys.executable, str(cleanup_script)],
-            capture_output=True,
-        )
-        time.sleep(2)
 
 
 def run_bench(model: str, ncmoe: int, uvm: bool, pp: int, tg: int) -> dict:

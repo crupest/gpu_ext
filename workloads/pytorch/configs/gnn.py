@@ -19,14 +19,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKLOAD_DIR = SCRIPT_DIR.parent
 WORKLOADS_DIR = WORKLOAD_DIR.parent
+sys.path.insert(0, str(WORKLOADS_DIR / "scripts"))
+from common import cleanup_gpu
+
 BENCHMARK = WORKLOAD_DIR / "benchmark_gnn_uvm.py"
-
-
-def cleanup_gpu():
-    cleanup_script = WORKLOADS_DIR / "cleanup_gpu.py"
-    if cleanup_script.exists():
-        subprocess.run([sys.executable, str(cleanup_script)], capture_output=True)
-        time.sleep(2)
 
 
 def run_gnn(nodes: int, uvm: bool, epochs: int, warmup: int) -> dict:
