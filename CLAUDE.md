@@ -67,6 +67,7 @@ Always run `python workloads/cleanup_gpu.py` before benchmarks to kill stale GPU
 - Large files (models, datasets, `.venv/`, build artifacts) are gitignored.
 - Never commit `.venv/`, `build/`, `*.gguf`, `*.bvecs`, or `__pycache__/`.
 - DO commit `pyproject.toml` and `uv.lock` for every workload.
+- **DO commit benchmark result JSON files** (`results/*.json`, `result/*.json`). They are small (4K each) and serve as experiment records. Always include them when committing after running experiments.
 
 ### Paper Reproduction
 
