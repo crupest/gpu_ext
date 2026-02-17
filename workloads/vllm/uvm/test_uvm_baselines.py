@@ -52,7 +52,7 @@ BASELINE_CONFIGS = {
     "uvm_baseline": {
         "name": "UVM Baseline",
         "server_dir": VLLM_SERVER_DIR,
-        "server_cmd": f"uv run vllm serve {MODEL} --enforce-eager",
+        "server_cmd": f"uv run vllm serve {MODEL} --enforce-eager --max-num-seqs 16",
         "env": {"VLLM_USE_UVM": "1"},
     },
     "lmcache": {

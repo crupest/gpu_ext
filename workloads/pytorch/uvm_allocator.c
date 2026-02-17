@@ -3,11 +3,16 @@
  *
  * This is a custom CUDA allocator that uses cudaMallocManaged
  * to enable Unified Virtual Memory (UVM) in PyTorch.
+ *
+ * When total managed allocation exceeds the GPU memory budget,
+ * new allocations get cudaMemAdviseSetPreferredLocation=CPU
+ * to prevent CUDA OOM from device memory exhaustion.
  */
 
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 
 // Global memory statistics
 static atomic_size_t total_allocated = 0;
@@ -15,10 +20,34 @@ static atomic_size_t peak_allocated = 0;
 static atomic_size_t num_allocs = 0;
 static atomic_size_t num_frees = 0;
 
+// GPU memory budget (initialized on first allocation)
+static size_t gpu_budget_bytes = 0;
+static int budget_initialized = 0;
+
 // Allocate CUDA managed memory
 void* uvm_malloc(ssize_t size, int device, cudaStream_t stream) {
     void* ptr = NULL;
     cudaError_t err;
+
+    // Initialize GPU budget on first call
+    if (!budget_initialized) {
+        const char* budget_env = getenv("UVM_GPU_BUDGET_GB");
+        if (budget_env) {
+            double budget_gb = atof(budget_env);
+            gpu_budget_bytes = (size_t)(budget_gb * 1024.0 * 1024.0 * 1024.0);
+        } else {
+            // Default: total GPU memory minus 2 GB headroom
+            size_t free_mem = 0, total_mem = 0;
+            if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+                size_t headroom = (size_t)(2.0 * 1024.0 * 1024.0 * 1024.0);
+                gpu_budget_bytes = (total_mem > headroom) ? (total_mem - headroom) : total_mem;
+            } else {
+                gpu_budget_bytes = (size_t)(32.0 * 1024.0 * 1024.0 * 1024.0);
+            }
+        }
+        fprintf(stderr, "[UVM] GPU budget: %.2f GB\n", gpu_budget_bytes / 1e9);
+        budget_initialized = 1;
+    }
 
     // Use cudaMallocManaged for UVM
     err = cudaMallocManaged(&ptr, size, cudaMemAttachGlobal);
@@ -41,15 +70,18 @@ void* uvm_malloc(ssize_t size, int device, cudaStream_t stream) {
         }
     }
 
-    // Log large allocations
-    if (size > 1000 * 1024 * 1024) { // > 1GB
-        fprintf(stderr, "[UVM] Alloc #%zu: %.2f GB (total: %.2f GB, peak: %.2f GB)\n",
-                alloc_count, size / 1e9, current / 1e9, atomic_load(&peak_allocated) / 1e9);
+    // Apply CPU preferred for allocations exceeding GPU budget
+    // This prevents CUDA OOM when total managed > physical GPU memory
+    if (ptr != NULL && size > 1024 * 1024 && current > gpu_budget_bytes) {
+        cudaMemAdvise(ptr, size, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId);
+        cudaMemAdvise(ptr, size, cudaMemAdviseSetAccessedBy, device);
     }
 
-    // Prefetch to the specified device to avoid page faults
-    if (device >= 0 && ptr != NULL) {
-        cudaMemPrefetchAsync(ptr, size, device, stream);
+    // Log large allocations
+    if (size > 1000 * 1024 * 1024) { // > 1GB
+        fprintf(stderr, "[UVM] Alloc #%zu: %.2f GB (total: %.2f GB, peak: %.2f GB)%s\n",
+                alloc_count, size / 1e9, current / 1e9, atomic_load(&peak_allocated) / 1e9,
+                current > gpu_budget_bytes ? " [CPU preferred]" : "");
     }
 
     return ptr;
