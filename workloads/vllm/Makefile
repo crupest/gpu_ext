@@ -1,6 +1,7 @@
 # Simplified Makefile for vLLM benchmarks
 
-VENV = ~/workspace/.venv/bin/activate
+VENV ?= .venv/bin/activate
+DATASET_PATH ?= datasets/ShareGPT_V3_unfiltered_cleaned_split.json
 
 .PHONY: bench download-datasets
 
@@ -10,7 +11,7 @@ bench:
 		--model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
 		--dataset-name sharegpt \
 		--num-prompts 1000 \
-		--dataset-path /home/yunwei37/workspace/schedcp/workloads/vllm/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
+		--dataset-path $(DATASET_PATH)
 
 # Download benchmark datasets
 download-datasets:

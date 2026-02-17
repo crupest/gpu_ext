@@ -1,153 +1,105 @@
-# LLaMA.cpp Benchmark Testing Documentation
+# llama.cpp Expert Offloading Benchmark (Experiment 1)
 
-## Test under 5090 platform
+Benchmarks llama.cpp with GPT-OSS-120B MoE model (~59 GiB) on a 32GB GPU, comparing framework CPU offloading vs UVM with gpu_ext eBPF policies.
 
-/home/yunwei37/workspace/gpu/schedcp/workloads/llama.cpp/build/bin/llama-server --gpt-oss-120b-default -ncmoe 64 -c 65536
+## Build
 
-GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 /home/yunwei37/workspace/gpu/schedcp/workloads/llama.cpp/build/bin/llama-server --gpt-oss-120b-default -c 65536
+```bash
+# Initialize submodule
+git submodule update --init llama.cpp
 
-$ uv run vllm bench serve --model  Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts  100 --dataset-path /home/yunwei37/workspace/gpu/schedcp/workloads/vllm/datasets/ShareGPT_V3_unfiltered_cleaned_split.json  --base-url http://127.0.0.1:8013  --max-concurrency=1
-
-Need to build with no VMM support
-
-$ GGML_CUDA_DISABLE_GRAPHS=1 GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 /home/yunwei37/workspace/gpu/schedcp/workloads/llama.cpp/build/bin/llama-server --gpt-oss-120b-default -c 65536
-
-In vllm dir, run
-
-uv run /home/yunwei37/workspace/gpu/schedcp/workloads/vllm/llamacpp_openai_client.py
-
-with UVM memory set to CPU first and unset it:
-
-                // SetPreferredLocation(CPU): Pages stay in system RAM, fetched on demand
-                advise_err = cudaMemAdvise(*ptr, size, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId);
-
+# Build with CUDA support (uses GCC-12 for CUDA 12.9 compatibility)
+make build-cuda
 ```
 
-Running llama-bench with UVM enabled...
-GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 build/bin/llama-bench \
-        -m /home/yunwei37/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-        2>&1 | tee results/gpt-oss-120b-uvm-bench.log
-ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        238.48 ± 1.43 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |          7.72 ± 0.01 |
+## Download Model & Dataset
 
-build: 10e97801 (7099)
+```bash
+# GPT-OSS-120B (~59 GiB, cached to ~/.cache/llama.cpp/)
+make download-models
 
-Benchmark complete! Results saved to: results/gpt-oss-120b-uvm-bench.log
+# ShareGPT dataset
+python download_sharegpt.py
 ```
 
-UVM set to GPU and other method does not work.
+Override model path: `MODEL_120B_CACHE=/your/path make bench-120b-uvm`
 
-With UVM set to CPU first and then set to access by:
+## Running Benchmarks
 
-```
-ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        238.45 ± 1.47 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |          7.70 ± 0.01 |
+Five configurations to compare:
 
-build: 10e97801 (7099)
-```
+```bash
+MODEL=~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf
 
+# Config 1: Framework CPU offload (ncmoe=64)
+./build/bin/llama-bench -ncmoe 64 -m $MODEL 2>&1 | tee results/ncmoe64.log
 
-Set CPU first then set to GPU first:
+# Config 2: Framework CPU offload (ncmoe=32)
+./build/bin/llama-bench -ncmoe 32 -m $MODEL 2>&1 | tee results/ncmoe32.log
 
-```
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        144.00 ± 1.18 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |         49.31 ± 3.82 |
-```
+# Config 3: UVM baseline (no policy)
+GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench -m $MODEL \
+  2>&1 | tee results/uvm_baseline.log
 
+# Config 4: UVM + user hints (cudaMemAdvise)
+# Requires llama.cpp built with cudaMemAdvise hints enabled
+GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench -m $MODEL \
+  2>&1 | tee results/uvm_user_hint.log
 
-with ncmoe64
-
-```
-$ build/bin/llama-bench  -ncmoe 64       -m /home/yunwei37/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf 
-ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        245.63 ± 2.05 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |         16.34 ± 0.03 |
-
-build: 10e97801 (7099)
-yunwei37@lab:~/workspace/gpu/schedcp/workloads/llama.cpp$ 
+# Config 5: UVM + gpu_ext eBPF (stride prefetch + LFU eviction)
+sudo bpftool struct_ops register /path/to/gpu_ext/extension/.output/prefetch_stride.bpf.o
+sudo bpftool struct_ops register /path/to/gpu_ext/extension/.output/eviction_lfu.bpf.o
+GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench -m $MODEL \
+  2>&1 | tee results/uvm_ebpf.log
 ```
 
-with ncmoe32
-
-```
-$ build/bin/llama-bench  -ncmoe 32       -m /home/yunwei37/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_g
-pt-oss-120b-mxfp4-00001-of-00003.gguf 
-ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        260.14 ± 2.32 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |         18.18 ± 0.05 |
-
-build: 10e97801 (7099)
+Or use the Makefile shortcut:
+```bash
+make bench-120b-uvm
 ```
 
-With prefetching
+## Verification
+
+Key metrics: `pp512` = prefill throughput (tok/s), `tg128` = decode throughput (tok/s).
+
+### Reference results (RTX 5090)
+
+| Config | pp512 (tok/s) | tg128 (tok/s) |
+|--------|--------------|--------------|
+| ncmoe=64 (framework offload) | 245.63 | 16.34 |
+| ncmoe=32 (framework offload) | 260.14 | 18.18 |
+| UVM baseline | 238.48 | 7.72 |
+| UVM + user hint | 144.00 | 49.31 |
+| **UVM + gpu_ext eBPF** | **229.67** | **86.89** |
+
+gpu_ext achieves ~4.8x decode speedup over framework offloading (86.89 vs 18.18 tok/s).
+
+## Generate Figures
+
+```bash
+cd uvm && python visbasic.py
+# produces llama_uvm_combined_color.pdf
+```
+
+## Directory Structure
 
 ```
- GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 build/bin/llama-bench         -m /home/yunwei37/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf         2>&1 | tee results/gpt-oss-120b-uvm-bench.log
-ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
-ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
-ggml_cuda_init: found 1 CUDA devices:
-  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           pp512 |        229.67 ± 1.35 |
-| gpt-oss 120B MXFP4 MoE         |  59.02 GiB |   116.83 B | CUDA       |  99 |           tg128 |         86.89 ± 5.22 |
-
-build: 10e97801 (7099)
-yunwei37@lab:~/workspace/gpu/schedcp/workloads
+llama.cpp/
+├── Makefile                # Build targets + benchmark shortcuts
+├── README.md               # This file
+├── llama.cpp/              # [submodule] eunomia-bpf/llama.cpp
+├── download_sharegpt.py    # Dataset downloader
+├── download_test_model.py  # Small model downloader (for quick tests)
+├── requirements.txt
+├── uvm/                    # UVM test scripts & visualization
+│   ├── visbasic.py                  # Figure generation
+│   └── plot_colocated_results.py    # Co-location figure
+├── docs/                   # Analysis & investigation notes
+│   ├── UVM_BUG_INVESTIGATION.md
+│   ├── test-record-single.md
+│   ├── test-record-co-located.md
+│   ├── moe_cuda_implementation_analysis.md
+│   ├── moe_offload_analysis.md
+│   └── ...
+└── results/                # Benchmark output logs
 ```
-
-## on my laptop, test with intel gpu backend
-
-
- /home/yunwei37/ai-os/workloads/llama.cpp/build/bin/llama-bench  -m /home/yunwei37/ai-os/workloads/llama.cpp/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf -n 1
-| model                          |       size |     params | backend    | threads |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
-| llama 1B Q4_K - Medium         | 636.18 MiB |     1.10 B | CPU        |       2 |           pp512 |         58.31 ± 1.75 |
-| llama 1B Q4_K - Medium         | 636.18 MiB |     1.10 B | CPU        |       2 |             tg1 |         27.86 ± 1.62 |
-
-build: 5aa1105da (6082)
-
-yunwei37@victoryang00-ASUS-Zenbook-S-14-UX5406SA-UX5406SA:~/ai-os/workloads/llama.cpp/llama.cpp$ /home/yunwei37/ai-os/workloads/llama.cpp/llama.cpp/build/bin/llama-bench -m /home/yunwei37/ai-os/workloads/llama.cpp/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf -n 1
-
-| model                          |       size |     params | backend    | ngl |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
-get_memory_info: [warning] ext_intel_free_memory is not supported (export/set ZES_ENABLE_SYSMAN=1 to support), use total memory as free memory
-get_memory_info: [warning] ext_intel_free_memory is not supported (export/set ZES_ENABLE_SYSMAN=1 to support), use total memory as free memory
-get_memory_info: [warning] ext_intel_free_memory is not supported (export/set ZES_ENABLE_SYSMAN=1 to support), use total memory as free memory
-| llama 1B Q4_K - Medium         | 636.18 MiB |     1.10 B | SYCL       |  99 |           pp512 |      629.25 ± 288.96 |
-| llama 1B Q4_K - Medium         | 636.18 MiB |     1.10 B | SYCL       |  99 |             tg1 |        23.02 ± 12.81 |
-
-build: 5aa1105da (6082)
-
-llama.cpp/build/bin/llama-server  -hf mradermacher/Qwen3-42B-A3B-2507-Thinking-Abliterated-uncensored-TOTAL-RECALL-v2-Medium-MASTER-CODER-i1-GGUF:Q4_K_M
-
-## control
-
-numactl --interleave=3 python /root/yunwei37/ai-os/workloads/llama.cpp/llamacpp_bench_start.py > llama_test.log

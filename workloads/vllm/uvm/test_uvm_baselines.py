@@ -11,7 +11,7 @@ Server directories:
 - CPU Offload & UVM: ~/workspace/vllm
 - LMCache: /home/yunwei37/workspace/gpu/LMCache
 
-Benchmark runs from: ~/workspace/gpu/schedcp/workloads/vllm
+Benchmark runs from: workloads/vllm
 """
 
 import argparse
@@ -25,11 +25,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Directories
-VLLM_SERVER_DIR = os.path.expanduser("~/workspace/vllm")
-LMCACHE_SERVER_DIR = "/home/yunwei37/workspace/gpu/LMCache"
+# Directories (override via environment variables)
+VLLM_SERVER_DIR = os.environ.get(
+    "VLLM_SERVER_DIR", os.path.expanduser("~/workspace/vllm")
+)
+LMCACHE_SERVER_DIR = os.environ.get(
+    "LMCACHE_SERVER_DIR", os.path.expanduser("~/workspace/gpu/LMCache")
+)
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_PATH = "/home/yunwei37/workspace/gpu/schedcp/workloads/vllm/datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
+DATASET_PATH = os.environ.get(
+    "DATASET_PATH",
+    os.path.join(BENCH_DIR, "datasets", "ShareGPT_V3_unfiltered_cleaned_split.json"),
+)
 
 # Model configuration
 MODEL = "Qwen/Qwen3-30B-A3B-FP8"
