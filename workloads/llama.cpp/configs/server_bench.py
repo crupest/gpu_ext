@@ -5,15 +5,15 @@ Usage:
     uv run python configs/server_bench.py --output results/server_default.json
     uv run python configs/server_bench.py --uvm --output results/server_uvm.json
 
-Starts llama-server, sends ShareGPT prompts via OpenAI-compatible streaming API,
-measures TTFT/TPOT/throughput, stops server.
+Starts llama-server, benchmarks with `vllm bench serve` (from vllm workload),
+parses output, stops server.
 
 Same script works with or without eBPF kernel module loaded.
 """
 import argparse
-import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -22,17 +22,17 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, median
-
-import aiohttp
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKLOAD_DIR = SCRIPT_DIR.parent
 WORKLOADS_DIR = WORKLOAD_DIR.parent
+VLLM_WORKLOAD_DIR = WORKLOADS_DIR / "vllm"
 LLAMA_SERVER = WORKLOAD_DIR / "build" / "bin" / "llama-server"
 DEFAULT_MODEL = Path.home() / ".cache/llama.cpp/ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"
 DATASET_DIR = WORKLOAD_DIR / "datasets"
 DATASET_PATH = DATASET_DIR / "sharegpt_vicuna.json"
+# gpt-oss GGUF has no HF tokenizer; use Qwen (locally cached) for token counting
+DEFAULT_TOKENIZER = "Qwen/Qwen3-30B-A3B-FP8"
 
 SERVER_STARTUP_TIMEOUT = 300
 SERVER_CHECK_INTERVAL = 5
@@ -43,25 +43,6 @@ def cleanup_gpu():
     if cleanup_script.exists():
         subprocess.run([sys.executable, str(cleanup_script)], capture_output=True)
         time.sleep(2)
-
-
-def load_sharegpt(path: Path, num_prompts: int) -> list[dict]:
-    """Load ShareGPT conversations and extract prompt/response pairs."""
-    data = json.loads(path.read_text())
-    prompts = []
-    for conv in data:
-        turns = conv.get("conversations", [])
-        if len(turns) >= 2:
-            human = turns[0]
-            assistant = turns[1]
-            if human.get("from") in ("human", "user") and assistant.get("from") in ("gpt", "assistant"):
-                prompts.append({
-                    "prompt": human["value"],
-                    "expected_tokens": len(assistant["value"].split()),
-                })
-        if len(prompts) >= num_prompts:
-            break
-    return prompts
 
 
 def wait_for_server(host: str, port: int, timeout: int, process=None) -> bool:
@@ -104,124 +85,35 @@ def stop_server(process):
                 pass
 
 
-async def benchmark_single(session: aiohttp.ClientSession, base_url: str,
-                           model_name: str, prompt: str, max_tokens: int) -> dict:
-    """Send one streaming chat completion request, measure TTFT and generation time."""
-    payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "stream": True,
+def parse_vllm_bench_output(output: str) -> dict:
+    """Parse vllm bench serve output into metrics dict."""
+    metrics = {}
+    patterns = {
+        "successful_requests": r"Successful requests:\s+(\d+)",
+        "benchmark_duration_s": r"Benchmark duration \(s\):\s+([\d.]+)",
+        "total_input_tokens": r"Total input tokens:\s+(\d+)",
+        "total_generated_tokens": r"Total generated tokens:\s+(\d+)",
+        "request_throughput_rps": r"Request throughput \(req/s\):\s+([\d.]+)",
+        "output_throughput_tok_s": r"Output token throughput \(tok/s\):\s+([\d.]+)",
+        "mean_ttft_ms": r"Mean TTFT \(ms\):\s+([\d.]+)",
+        "median_ttft_ms": r"Median TTFT \(ms\):\s+([\d.]+)",
+        "p99_ttft_ms": r"P99 TTFT \(ms\):\s+([\d.]+)",
+        "mean_tpot_ms": r"Mean TPOT \(ms\):\s+([\d.]+)",
+        "median_tpot_ms": r"Median TPOT \(ms\):\s+([\d.]+)",
+        "p99_tpot_ms": r"P99 TPOT \(ms\):\s+([\d.]+)",
     }
-
-    t_start = time.monotonic()
-    t_first_token = None
-    generated_tokens = 0
-
-    try:
-        async with session.post(f"{base_url}/v1/chat/completions", json=payload) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                return {"error": f"HTTP {resp.status}: {body[:200]}"}
-
-            async for line in resp.content:
-                decoded = line.decode("utf-8").strip()
-                if not decoded.startswith("data: "):
-                    continue
-                data_str = decoded[6:]
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content and t_first_token is None:
-                        t_first_token = time.monotonic()
-                    if content:
-                        generated_tokens += 1
-                except json.JSONDecodeError:
-                    continue
-    except Exception as e:
-        return {"error": str(e)}
-
-    t_end = time.monotonic()
-
-    if t_first_token is None:
-        return {"error": "no tokens generated"}
-
-    ttft_ms = (t_first_token - t_start) * 1000
-    total_s = t_end - t_start
-    tpot_ms = ((t_end - t_first_token) * 1000 / max(generated_tokens - 1, 1)) if generated_tokens > 1 else 0.0
-
-    return {
-        "ttft_ms": ttft_ms,
-        "tpot_ms": tpot_ms,
-        "total_s": total_s,
-        "generated_tokens": generated_tokens,
-    }
-
-
-async def run_benchmark(base_url: str, model_name: str, prompts: list[dict],
-                        max_tokens: int, max_concurrency: int, request_rate: float) -> dict:
-    """Run all prompts against the server."""
-    connector = aiohttp.TCPConnector(limit=max_concurrency)
-    timeout = aiohttp.ClientTimeout(total=600)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        results = []
-        sem = asyncio.Semaphore(max_concurrency)
-
-        async def send_one(prompt_data: dict):
-            async with sem:
-                r = await benchmark_single(session, base_url, model_name,
-                                           prompt_data["prompt"], max_tokens)
-                results.append(r)
-
-        tasks = []
-        for i, p in enumerate(prompts):
-            tasks.append(asyncio.create_task(send_one(p)))
-            if request_rate > 0 and i < len(prompts) - 1:
-                await asyncio.sleep(1.0 / request_rate)
-
-        await asyncio.gather(*tasks)
-
-    # Compute stats from successful results
-    ok = [r for r in results if "error" not in r]
-    errors = [r for r in results if "error" in r]
-
-    if not ok:
-        return {"successful_requests": 0, "failed_requests": len(errors)}
-
-    ttfts = [r["ttft_ms"] for r in ok]
-    tpots = [r["tpot_ms"] for r in ok if r["tpot_ms"] > 0]
-    total_tokens = sum(r["generated_tokens"] for r in ok)
-    total_time = max(r["total_s"] for r in ok)
-
-    def percentile(data, p):
-        if not data:
-            return 0.0
-        sorted_d = sorted(data)
-        idx = int(len(sorted_d) * p / 100)
-        return sorted_d[min(idx, len(sorted_d) - 1)]
-
-    return {
-        "successful_requests": len(ok),
-        "failed_requests": len(errors),
-        "total_generated_tokens": total_tokens,
-        "total_time_s": round(total_time, 2),
-        "output_throughput_tok_s": round(total_tokens / total_time, 2) if total_time > 0 else 0,
-        "mean_ttft_ms": round(mean(ttfts), 2),
-        "median_ttft_ms": round(median(ttfts), 2),
-        "p99_ttft_ms": round(percentile(ttfts, 99), 2),
-        "mean_tpot_ms": round(mean(tpots), 2) if tpots else 0,
-        "median_tpot_ms": round(median(tpots), 2) if tpots else 0,
-        "p99_tpot_ms": round(percentile(tpots, 99), 2) if tpots else 0,
-    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, output)
+        if match:
+            val = match.group(1)
+            metrics[key] = float(val) if "." in val else int(val)
+    return metrics
 
 
 def run_server_bench(model: str, uvm: bool, ctx: int, port: int,
-                     prompts: int, max_tokens: int, max_concurrency: int,
+                     prompts: int, max_concurrency: int,
                      request_rate: float) -> dict:
-    """Start server, benchmark, stop server, return result."""
+    """Start llama-server, run vllm bench serve, stop server, return result."""
     # Build server command
     cmd = [
         str(LLAMA_SERVER),
@@ -251,7 +143,7 @@ def run_server_bench(model: str, uvm: bool, ctx: int, port: int,
             stop_server(server_proc)
             sys.exit(1)
 
-        print(f"Server ready. Loading {prompts} ShareGPT prompts...", file=sys.stderr)
+        print(f"Server ready. Running vllm bench serve ({prompts} prompts)...", file=sys.stderr)
 
         # Download dataset if needed
         if not DATASET_PATH.exists():
@@ -261,18 +153,36 @@ def run_server_bench(model: str, uvm: bool, ctx: int, port: int,
                 cwd=str(WORKLOAD_DIR),
             )
 
-        sharegpt_prompts = load_sharegpt(DATASET_PATH, prompts)
-        print(f"Loaded {len(sharegpt_prompts)} prompts. Running benchmark...", file=sys.stderr)
-
+        # Use vllm bench serve from the vllm workload as the benchmark client
         model_name = Path(model).stem
-        base_url = f"http://127.0.0.1:{port}"
+        bench_cmd = (
+            f"uv run --directory {VLLM_WORKLOAD_DIR} vllm bench serve "
+            f"--model {model_name} "
+            f"--tokenizer {DEFAULT_TOKENIZER} "
+            f"--dataset-name sharegpt "
+            f"--dataset-path {DATASET_PATH} "
+            f"--base-url http://127.0.0.1:{port} "
+            f"--num-prompts {prompts} "
+            f"--max-concurrency {max_concurrency} "
+            f"--request-rate {request_rate}"
+        )
 
         start = time.time()
-        metrics = asyncio.run(run_benchmark(
-            base_url, model_name, sharegpt_prompts,
-            max_tokens, max_concurrency, request_rate,
-        ))
+        bench_result = subprocess.run(
+            bench_cmd, shell=True,
+            capture_output=True, text=True,
+        )
         elapsed = time.time() - start
+
+        bench_output = bench_result.stdout + bench_result.stderr
+
+        if bench_result.returncode != 0:
+            print(f"vllm bench serve failed (exit {bench_result.returncode}):", file=sys.stderr)
+            print(bench_output[-2000:], file=sys.stderr)
+            stop_server(server_proc)
+            sys.exit(1)
+
+        metrics = parse_vllm_bench_output(bench_output)
 
     finally:
         print("Stopping server...", file=sys.stderr)
@@ -291,13 +201,13 @@ def run_server_bench(model: str, uvm: bool, ctx: int, port: int,
             "uvm": uvm,
             "ctx": ctx,
             "prompts": prompts,
-            "max_tokens": max_tokens,
             "max_concurrency": max_concurrency,
             "request_rate": request_rate,
         },
         "metrics": metrics,
         "timestamp": datetime.now().isoformat(),
         "duration_s": round(elapsed, 2),
+        "raw": {"bench_output": bench_output},
     }
 
 
@@ -308,9 +218,8 @@ def main():
     parser.add_argument("--ctx", type=int, default=65536, help="Context size")
     parser.add_argument("--port", type=int, default=8013, help="Server port")
     parser.add_argument("--prompts", type=int, default=100, help="Number of ShareGPT prompts")
-    parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens per response")
     parser.add_argument("--max-concurrency", type=int, default=1, help="Max concurrent requests")
-    parser.add_argument("--request-rate", type=float, default=0.0, help="Requests per second (0=no limit)")
+    parser.add_argument("--request-rate", type=float, default=0.2, help="Requests per second")
     parser.add_argument("--output", "-o", help="Output JSON path (default: stdout)")
     parser.add_argument("--no-cleanup", action="store_true", help="Skip GPU cleanup")
     args = parser.parse_args()
@@ -322,13 +231,16 @@ def main():
     if not Path(args.model).exists():
         print(f"ERROR: Model not found at {args.model}", file=sys.stderr)
         sys.exit(1)
+    if not VLLM_WORKLOAD_DIR.exists():
+        print(f"ERROR: vllm workload not found at {VLLM_WORKLOAD_DIR}", file=sys.stderr)
+        sys.exit(1)
 
     if not args.no_cleanup:
         cleanup_gpu()
 
     result = run_server_bench(
         args.model, args.uvm, args.ctx, args.port,
-        args.prompts, args.max_tokens, args.max_concurrency,
+        args.prompts, args.max_concurrency,
         args.request_rate,
     )
 
