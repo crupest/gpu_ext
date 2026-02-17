@@ -18,7 +18,7 @@ RESULTS_DIR="$SCRIPT_DIR/results/exp1_expert_offload"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 LLAMA_BENCH="$SCRIPT_DIR/build/bin/llama-bench"
-MODEL="${MODEL_120B_CACHE:-$HOME/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF/gpt-oss-120b-mxfp4-00001-of-00003.gguf}"
+MODEL="${MODEL_120B_CACHE:-$HOME/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf}"
 NRUNS="${NRUNS:-10}"
 
 mkdir -p "$RESULTS_DIR"
