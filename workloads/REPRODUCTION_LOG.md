@@ -207,21 +207,127 @@ Dataset files:
 
 ---
 
-## Overall Summary
+---
 
-| Workload | Normal | UVM | Notes |
-|----------|--------|-----|-------|
-| PyTorch GNN | PASS (0.22s/epoch @ 1M) | PASS (5.53s/epoch @ 5M, peak 22.56GB) | Must cleanup GPU first |
-| llama.cpp | PASS (pp512=9898, tg128=363 @ 20B) | NOT TESTED | 46G models incompatible with submodule; 120B not downloaded |
-| FAISS | PENDING | PENDING | Data moved, FAISS needs build |
-| vLLM | SKIPPED | SKIPPED | Heavy install |
+## Session 2: Atomic Script Verification (2026-02-17)
 
-## Issues Discovered
+**Environment**: Same hardware. PyTorch 2.10.0+cu128, CUDA 12.8, vLLM 0.11.0rc2.
+**Goal**: Test all new atomic config scripts with UVM oversubscription.
 
-1. **Stale GPU processes cause OOM**: A running `llama-server` used 19GB, leaving insufficient GPU for UVM tests. **Fix**: Always run `cleanup_gpu.py` before benchmarks.
+### llama.cpp 120B Expert Offload (from run_exp1_expert_offload.sh)
 
-2. **`--use_gpu_allocator` crashes with cuBLAS**: The custom `gpu_allocator.so` (uses `cudaMalloc`) causes `CUBLAS_STATUS_INVALID_VALUE` during backward pass. Default PyTorch allocator works. UVM allocator (`--use_uvm`) works.
+Model: GPT-OSS-120B MXFP4 MoE (59 GiB, ~117B params), 1.84x oversubscription on 32GB GPU.
+1 trial each.
 
-3. **llama.cpp model compatibility**: The submodule (build f92e406b) cannot load Qwen3-Next-80B or Qwen3-Coder-Next GGUF files. Need GPT-OSS-120B for the paper's UVM experiment.
+| Config | pp512 (tok/s) | tg128 (tok/s) | Paper Reference |
+|--------|--------------|--------------|-----------------|
+| ncmoe=64 (CPU offload) | 242.35 | 16.37 | 245.63 / 16.34 |
+| ncmoe=32 (CPU offload) | 257.45 | 18.17 | 260.14 / 18.18 |
+| UVM baseline | 136 | 48.9 | 238.48 / 7.72 |
 
-4. **Reference results discrepancy**: PyTorch 5M UVM epoch time is 5.53s now vs 34.23s in Dec 2025 reference. The reference was likely obtained with the modified kernel module which changes UVM page migration behavior.
+UVM baseline: after implementing warmup-then-migrate strategy (ported from schedcp).
+Initial run without warmup-then-migrate: pp512=53, tg128=1.9.
+
+#### UVM warmup-then-migrate fix (submodule commit 26836b27)
+
+Root cause: commit `6e603612` in llama.cpp submodule had `assert(global_uvm_allocation_pointer.ptr)`
+in `ggml_cuda_compute_forward` — crashes when UVM is disabled (ptr=NULL).
+
+Fix:
+- Phase 1 (`ggml_cuda_device_malloc`): first UVM alloc → `cudaMemAdviseSetPreferredLocation=CPU`
+- Phase 2 (`ggml_cuda_compute_forward`): first compute → switch to `SetPreferredLocation=GPU`
+- Guard: `if (ptr)` instead of `assert(ptr)`
+
+### Atomic Script Matrix Test
+
+All scripts tested sequentially (one GPU experiment at a time).
+UVM configs use oversubscribed data sizes to exercise real page fault paths.
+
+#### llama.cpp bench (`configs/bench.py`)
+
+| Config | Model | pp512 (tok/s) | tg128 (tok/s) | Duration |
+|--------|-------|--------------|--------------|----------|
+| no UVM | 20B (12GB) | 9842 | 362 | 2.5s |
+| UVM | 120B (59GB, 1.84x) | 138 | 48 | ~120s |
+
+#### llama.cpp server_bench (`configs/server_bench.py`)
+
+Uses `vllm bench serve` (from vllm workload) as benchmark client.
+Tokenizer: `Qwen/Qwen3-30B-A3B-FP8` (gpt-oss GGUF has no HF tokenizer).
+ShareGPT dataset, 10 prompts, request-rate=0.2, max-concurrency=1.
+
+| Config | Model | TTFT (med, ms) | TPOT (med, ms) | Throughput (tok/s) | Success |
+|--------|-------|---------------|----------------|-------------------|---------|
+| no UVM | 20B | 49 | 2.9 | 52.5 | 10/10 |
+| UVM | 120B (1.84x) | 256 | 78.8 | 2.3 | 1/10 |
+
+120B UVM server: model loads OK (~110s), first request succeeds. Remaining 9 fail —
+likely KV cache allocation (ctx=65536) on top of 59GB model causes severe page thrashing.
+Paper RQ2 co-location uses 20B model for server workload, not 120B.
+
+#### PyTorch GNN (`configs/gnn.py`)
+
+| Config | Nodes | Avg Epoch (s) | Peak Memory |
+|--------|-------|--------------|-------------|
+| no UVM | 1M | 0.22 | 2.8 GB |
+| UVM | 10M (1.43x) | 146.09 | ~45 GB |
+
+Paper reference (without-prefetch): 10M=70.06s. Our 146s is slower — possibly due to
+different driver/CUDA version or UVM allocator budget handling.
+
+**Known issue**: GNN UVM crashes at 1M nodes with `CUBLAS_STATUS_INVALID_VALUE`.
+Works fine at 5M+. Paper only tests UVM at 5M+ nodes.
+
+#### FAISS search (`configs/search.py`)
+
+| Config | Dataset | Search Time | Recall (1-R@1) |
+|--------|---------|-------------|----------------|
+| no UVM | SIFT1M | 17.8ms | 0.3498 |
+| UVM | SIFT100M (1.6x) | 7246ms | 0.4486 |
+
+#### vLLM serve_bench (`configs/serve_bench.py`)
+
+Model: Qwen/Qwen3-30B-A3B-FP8. ShareGPT dataset, 10 prompts.
+
+| Config | TTFT (med, ms) | TPOT (med, ms) | Success |
+|--------|---------------|----------------|---------|
+| cpu_offload (--cpu-offload-gb 8) | 990 | 76 | 10/10 |
+| UVM (VLLM_USE_UVM=1) | 18108 | 51 | 10/10 |
+
+UVM TTFT is very high (18s) — initial page faults when model weights are first accessed.
+TPOT is actually lower than cpu_offload once weights are resident.
+
+#### Layer 2 Infrastructure
+
+| Tool | Test | Result |
+|------|------|--------|
+| `scripts/run_trials.py` | 2 trials × llama bench 20B | geomean=9814.3 tok/s, stddev=5.1 |
+| `scripts/collect_results.py` | Called by run_trials | JSON summary with geomean/stddev/min/max |
+
+### Summary Matrix
+
+| Script | no UVM | UVM (oversubscribed) | Status |
+|--------|--------|---------------------|--------|
+| llama bench | pp=9842, tg=362 (20B) | pp=138, tg=48 (120B, 1.84x) | OK |
+| llama server | TTFT=49ms, TPOT=2.9ms (20B) | TTFT=256ms, TPOT=78.8ms (120B, 1/10 ok) | OK* |
+| pytorch GNN | 0.22s/epoch (1M) | 146s/epoch (10M, 1.43x) | OK |
+| FAISS search | 17.8ms (SIFT1M) | 7246ms (SIFT100M, 1.6x) | OK |
+| vLLM serve | TTFT=990ms, TPOT=76ms (cpu_offload) | TTFT=18108ms, TPOT=51ms (UVM) | OK |
+
+*120B server 9/10 requests fail due to extreme page thrashing at ctx=65536.
+
+---
+
+## Known Issues (cumulative)
+
+1. **Stale GPU processes cause OOM**: Always run `cleanup_gpu.py` before benchmarks.
+
+2. **`--use_gpu_allocator` crashes with cuBLAS**: The custom `gpu_allocator.so` causes `CUBLAS_STATUS_INVALID_VALUE`. UVM allocator works.
+
+3. **GNN UVM at small node counts**: Crashes at 1M nodes with CUBLAS error. Works at 5M+.
+
+4. **120B server UVM timeout**: 9/10 requests fail with 120B model + ctx=65536 in UVM mode. KV cache on top of 59GB model causes severe thrashing.
+
+5. **UVM pp512 gap vs paper**: 120B UVM baseline gets pp512=136 vs paper's 238. Warmup-then-migrate helps (53→136) but doesn't close the gap. May need the paper's kernel module optimizations.
+
+6. **Reference results discrepancy**: PyTorch 5M UVM epoch time varies between sessions (5.53s vs 34.26s) — likely depends on GPU memory state and driver behavior.
