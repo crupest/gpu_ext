@@ -1,0 +1,14 @@
+[project]
+name = "vllm-workload"
+version = "0.1.0"
+description = "vLLM benchmark workload for gpu_ext paper (KV-cache Offloading)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "matplotlib",
+]
+
+[tool.uv]
+# vLLM is installed from local source (~/workspace/vllm) with UVM support.
+# After building vllm from source, install with:
+#   uv pip install -e ~/workspace/vllm

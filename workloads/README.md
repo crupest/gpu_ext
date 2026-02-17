@@ -547,16 +547,135 @@ Scripts use relative paths by default. Override via environment variables or Mak
 
 ---
 
+## Paper Reproduction Checklist (Strict)
+
+All experiments must strictly follow the paper configurations. Each experiment has a **one-click run script** that saves full logs and outputs results.
+
+### Software Versions (Paper §6.1)
+
+| Software | Paper Version | Notes |
+|----------|--------------|-------|
+| PyTorch | 2.9.0 | with custom UVM/GPU allocator |
+| vLLM | 0.11.0 | with custom UVM allocator |
+| llama.cpp | build 7101 (commit 65b578b1) | eunomia-bpf/llama.cpp fork |
+| Faiss | 1.13.0 | eunomia-bpf/faiss fork |
+| CUDA | 12.9 | Driver 575.57.08 |
+
+All tests: **10 trials, geometric mean** unless otherwise specified.
+
+### Experiment → Figure/Table Mapping
+
+| # | Experiment | Paper | Model/Dataset | Run Script | Needs Modified KM? |
+|---|-----------|-------|---------------|------------|-------------------|
+| 1 | llama.cpp Expert Offloading | RQ1, Fig 6 | GPT-OSS-120B (59 GiB) | `llama.cpp/run_exp1_expert_offload.sh` | Configs 4-5 only |
+| 2 | vLLM KV-cache Offloading | RQ1, Fig 7 | Qwen3-30B-A3B-FP8 (~30GB) | `vllm/run_exp2_kv_offload.sh` | Config 3 only |
+| 3 | PyTorch GNN Training | RQ1, Fig 8 | Random graphs 1M-15M nodes | `pytorch/run_exp3_gnn.sh` | Configs 4-5 only |
+| 4 | FAISS Vector Search | RQ1, Fig 9 | SIFT 20M/50M/100M | `faiss/run_exp4_vector_search.sh` | Config 2 only |
+| 5 | Two-Tenant Co-location | RQ2, Fig 12 | llama.cpp 20B + GNN 8M | `llama.cpp/run_exp5_two_tenant.sh` | gpu_ext config only |
+| 6 | Compute-bound Scheduler | RQ2, Fig 10 | 2LC+4BE processes | (microbench) | Yes |
+| 7 | Memory-bound Priority | RQ2, Fig 11 | HotSpot/GEMM/K-Means | (microbench) | Yes |
+| 8 | Mechanism Overhead | RQ3, Fig 13 | vector-add, GEMM, HotSpot | (microbench) | Yes |
+
+### Configurations Per Experiment
+
+**Exp 1: llama.cpp (Fig 6) — 5 configs:**
+1. `ncmoe=64` — Framework CPU offload (64 experts on CPU)
+2. `ncmoe=32` — Framework CPU offload (32 experts on CPU)
+3. `UVM baseline` — Default CUDA Unified Memory, no policy
+4. `UVM + user hints` — cudaMemAdvise hints (needs modified KM)
+5. `UVM + gpu_ext eBPF` — Stride prefetch + LFU eviction (needs modified KM)
+
+**Exp 2: vLLM (Fig 7) — 4 configs:**
+1. `cpu_offload` — `vllm serve --cpu-offload-gb 8`
+2. `uvm_baseline` — `VLLM_USE_UVM=1 vllm serve`
+3. `uvm_ebpf` — UVM + gpu_ext sequential prefetch (needs modified KM)
+4. `lmcache` — LMCache KV-cache offloading
+
+**Exp 3: PyTorch GNN (Fig 8) — 5 configs × 8 node counts:**
+- Node counts: 1M, 3M, 5M, 7M, 8M, 10M, 12M, 15M
+1. `native GPU` — Default allocator, no UVM (1M-7M only, OOMs beyond)
+2. `UVM baseline` — cudaMallocManaged, default driver (5M-15M)
+3. `UVM + user prefetch` — cudaMemPrefetchAsync (5M-15M)
+4. `UVM + gpu_ext eBPF` — Sequential eBPF prefetch (needs modified KM)
+5. `UVM + user prefetch + gpu_ext` — Combined (needs modified KM)
+
+**Exp 4: FAISS (Fig 9) — 2 configs × 3 dataset sizes:**
+- Datasets: SIFT20M (9.5GB), SIFT50M (24GB), SIFT100M (48GB)
+- Index: IVF4096,Flat, nprobe=1,4,16
+1. `UVM baseline` — Default UVM
+2. `UVM + gpu_ext eBPF` — Adaptive prefetch (needs modified KM)
+
+**Exp 5: Two-Tenant (Fig 12) — 2 configs:**
+- T1 (LC): llama.cpp server (gpt-oss-20b, UVM, ctx=65536), 100 ShareGPT @ 0.2 RPS
+- T2 (BE): GNN training (8M nodes, UVM, 25 epochs)
+1. `default UVM` — Both compete under driver FIFO/LRU
+2. `gpu_ext per-tenant` — LC gets prefetch priority (needs modified KM)
+
+### Baseline Configs (Runnable Without Modified KM)
+
+| Experiment | Runnable Configs | Script |
+|-----------|-----------------|--------|
+| llama.cpp | 1 (ncmoe=64), 2 (ncmoe=32), 3 (UVM baseline) | `run_exp1_expert_offload.sh` |
+| vLLM | 1 (cpu_offload), 2 (uvm_baseline), 4 (lmcache) | `run_exp2_kv_offload.sh` |
+| PyTorch GNN | 1 (native GPU), 2 (UVM baseline), 3 (UVM+prefetch) | `run_exp3_gnn.sh` |
+| FAISS | 1 (UVM baseline) | `run_exp4_vector_search.sh` |
+| Two-Tenant | 1 (default UVM) | `run_exp5_two_tenant.sh` |
+
+### Reference Results (Paper, RTX 5090)
+
+**llama.cpp GPT-OSS-120B (tok/s):**
+| Config | pp512 | tg128 |
+|--------|-------|-------|
+| ncmoe=64 | 245.63 | 16.34 |
+| ncmoe=32 | 260.14 | 18.18 |
+| UVM baseline | 238.48 | 7.72 |
+| UVM+hints | 144.00 | 49.31 |
+| UVM+gpu_ext | 229.67 | 86.89 |
+
+**vLLM Qwen-30B (100 concurrent requests):**
+| Config | Mean TTFT (ms) | Mean TPOT (ms) | Throughput (tok/s) |
+|--------|---------------|---------------|-------------------|
+| CPU offload | 8387.80 | 324.13 | 391.14 |
+| UVM baseline | 9642.27 | 374.23 | 307.26 |
+| UVM+gpu_ext | 5042.22 | 235.68 | 376.53 |
+| LMCache | 5401.71 | 222.24 | 571.54 |
+
+**PyTorch GNN (epoch time, without user prefetch):**
+| Nodes | Native GPU | UVM Baseline | UVM+gpu_ext |
+|-------|-----------|-------------|-------------|
+| 5M | 1.14s | 34.23s | 12.76s |
+| 7M | 1.79s | 48.28s | 17.81s |
+| 8M | OOM | 55.36s | 20.51s |
+| 10M | OOM | 70.06s | 26.47s |
+| 12M | OOM | 93.71s | 39.74s |
+| 15M | OOM | 292.77s | 168.73s |
+
+**FAISS SIFT100M (IVF4096,Flat):**
+| Metric | UVM Baseline | UVM+gpu_ext |
+|--------|-------------|-------------|
+| Add time | 68.41s | 49.31s |
+| Search nprobe=1 | 5.14s | 4.53s |
+| Search nprobe=4 | 14.39s | 13.11s |
+| Search nprobe=16 | 56.51s | 51.44s |
+
+**Two-Tenant (llama.cpp 20B + GNN 8M):**
+| Metric | Single llama.cpp | Co-located (UVM) | Co-located (gpu_ext) |
+|--------|-----------------|------------------|---------------------|
+| TPOT (ms) | 3.67 | 19.73 | 10.86 |
+| GNN epoch (s) | — | 23.23 | 16.72 |
+
+---
+
 ## What's Still Missing From This Repo
 
 The following items are needed to fully reproduce all experiments but are not yet in the gpu_ext repository:
 
 | Item | Needed For | Size | How to Get |
 |------|-----------|------|-----------|
-| SIFT1B dataset | Faiss (Exp 4) | ~60 GB | Download from http://corpus-texmex.irisa.fr/ into `faiss/faiss/benchs/bigann/` |
 | GPT-OSS-120B model | llama.cpp (Exp 1) | ~59 GiB | `huggingface-cli download ggml-org/gpt-oss-120b-GGUF` |
 | Qwen3-30B-A3B-FP8 model | vLLM (Exp 2) | ~30 GB | Auto-downloaded by vLLM on first run |
-| vLLM (modified for UVM) | vLLM (Exp 2) | - | Clone and patch vLLM with UVM support |
-| LMCache | vLLM baseline comparison | - | Clone from github.com/LMCache/LMCache |
-| HotSpot/GEMM/K-Means kernels | Multi-tenant microbench (Exp 6) | small | From Rodinia/PolyBench/UVMBench suites |
-| cuda-samples vector-add | Device microbench (Exp 7) | small | From NVIDIA cuda-samples |
+| SIFT1B dataset | Faiss (Exp 4) | ~60 GB | `bash faiss/download_sift.sh` |
+| vLLM (modified for UVM) | vLLM (Exp 2) | — | `uv pip install vllm` |
+| LMCache | vLLM baseline (Exp 2) | — | Clone from github.com/LMCache/LMCache |
+| HotSpot/GEMM/K-Means | Multi-tenant microbench (Exp 7) | small | From Rodinia/PolyBench/UVMBench |
+| cuda-samples vector-add | Device microbench (Exp 8) | small | From NVIDIA cuda-samples |
