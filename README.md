@@ -91,9 +91,9 @@ kernel-open/nvidia-drm.ko
 kernel-open/nvidia-uvm.ko      # Contains eBPF hooks
 ```
 
-### 3. Load Custom Kernel Module
+### 3. Load Custom Kernel Module (insmod only)
 
-Replace the system NVIDIA modules with the custom-built ones (temporary, reverts on reboot):
+> **IMPORTANT**: Only use `insmod` for temporary loading. **NEVER run `make modules_install`** or copy `.ko` files to `/lib/modules/`. The custom modules are loaded into the running kernel only and automatically revert to the system NVIDIA driver on reboot. This ensures system stability — if anything goes wrong, a simple reboot restores the original driver.
 
 ```bash
 # Unload system modules
@@ -102,7 +102,7 @@ sudo systemctl stop gdm3 2>/dev/null || true
 sleep 2
 sudo rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
 
-# Load custom modules (in dependency order)
+# Load custom modules via insmod (in dependency order)
 sudo insmod kernel-module/nvidia-module/kernel-open/nvidia.ko
 sudo insmod kernel-module/nvidia-module/kernel-open/nvidia-modeset.ko
 sudo insmod kernel-module/nvidia-module/kernel-open/nvidia-drm.ko
@@ -115,7 +115,13 @@ sudo systemctl start gdm3 2>/dev/null || true
 lsmod | grep nvidia
 ```
 
-For permanent installation and troubleshooting, see [docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md](docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md).
+To revert to system modules at any time (without reboot):
+```bash
+sudo rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia
+sudo modprobe nvidia && sudo modprobe nvidia_uvm
+```
+
+For detailed troubleshooting, see [docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md](docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md).
 
 ### 4. Load an eBPF Policy
 
