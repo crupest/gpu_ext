@@ -23,35 +23,58 @@ This directory contains all benchmark workloads used in the gpu_ext paper evalua
 ```
 workloads/
 ├── README.md                # This file
+├── REPRODUCTION_LOG.md      # Experiment session logs
+├── cleanup_gpu.py           # Kill stale GPU processes
+├── scripts/                 # Shared tools (Layer 2)
+│   ├── common.py            # Shared utilities (cleanup_gpu, wait_for_server, etc.)
+│   ├── run_trials.py        # Generic N-trial runner
+│   └── collect_results.py   # Geomean/stddev aggregation
 ├── llama.cpp/               # LLM inference (Expert Offloading, Multi-Tenant)
 │   ├── Makefile             # Build & benchmark targets
-│   ├── README.md            # How to run + verify
 │   ├── llama.cpp/           # [submodule] eunomia-bpf/llama.cpp
-│   ├── uvm/                 # UVM test scripts & visualization
-│   ├── docs/                # Analysis: UVM bugs, MoE, test records
+│   ├── configs/             # Atomic benchmark scripts (Layer 1)
+│   │   ├── bench.py         # llama-bench single run
+│   │   └── server_bench.py  # llama-server + vllm bench serve
+│   ├── run_exp5_two_tenant.sh  # Co-location experiment (not yet atomized)
 │   ├── datasets/            # ShareGPT (gitignored)
 │   └── results/
 ├── vllm/                    # LLM serving (KV-cache Offloading)
 │   ├── Makefile             # Quick bench + dataset download
-│   ├── README.md            # How to run + verify
-│   ├── uvm/                 # Baseline comparison framework
-│   ├── docs/                # LMCache setup, test records
+│   ├── configs/             # Atomic benchmark scripts (Layer 1)
+│   │   └── serve_bench.py   # vLLM server + vllm bench serve
 │   ├── datasets/            # ShareGPT (gitignored)
 │   └── results/
 ├── pytorch/                 # GNN Training (UVM oversubscription)
 │   ├── Makefile             # Build allocator .so
-│   ├── README.md            # How to run + verify
-│   ├── benchmark_gnn_uvm.py
-│   ├── visualize_all.py
-│   ├── docs/                # UVM evaluation, GCN benchmark notes
-│   ├── with-user-prefetch/  # Results with cudaMemPrefetchAsync
-│   └── without-user-prefetch/
-└── faiss/                   # Vector Search (SIFT dataset)
-    ├── README.md            # How to run + verify
-    ├── bench_gpu_1bn.py     # Main GPU benchmark
-    ├── faiss/               # [submodule] eunomia-bpf/faiss
-    ├── docs/                # Dataset docs, prefetch analysis
-    └── results/             # Logs & visualization
+│   ├── benchmark_gnn_uvm.py # Core GNN benchmark
+│   ├── configs/             # Atomic benchmark scripts (Layer 1)
+│   │   └── gnn.py           # GNN training single run
+│   └── result/
+├── faiss/                   # Vector Search (SIFT dataset)
+│   ├── bench_gpu_1bn.py     # Core FAISS benchmark
+│   ├── faiss/               # [submodule] eunomia-bpf/faiss
+│   ├── configs/             # Atomic benchmark scripts (Layer 1)
+│   │   └── search.py        # FAISS search single run
+│   └── results/
+└── _deprecated/             # Old monolithic scripts (superseded by configs/*.py)
+```
+
+### Script Architecture
+
+**Layer 1 (Atomic scripts)**: Each `configs/*.py` runs one config, one trial, outputs JSON.
+
+```bash
+# Example: single llama-bench run
+uv run python configs/bench.py --uvm --output results/bench_uvm.json
+```
+
+**Layer 2 (Multi-trial)**: `scripts/run_trials.py` runs N trials, `scripts/collect_results.py` computes geomean/stddev.
+
+```bash
+# Example: 10 trials of llama-bench with UVM
+python scripts/run_trials.py --trials 10 \
+  --command "uv run python llama.cpp/configs/bench.py --uvm" \
+  --results-dir results/exp1/uvm_baseline/
 ```
 
 ---
@@ -107,42 +130,36 @@ make download-models
 
 ### Run Benchmarks
 
-Five configurations need to be compared:
+Five configurations, using atomic scripts:
 
 ```bash
+cd workloads/llama.cpp
+
 # Config 1: Framework CPU offload (ncmoe=64)
-./build/bin/llama-bench -ncmoe 64 \
-  -m ~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  2>&1 | tee results/ncmoe64.log
+uv run python configs/bench.py --ncmoe 64 -o results/ncmoe64.json
 
 # Config 2: Framework CPU offload (ncmoe=32)
-./build/bin/llama-bench -ncmoe 32 \
-  -m ~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  2>&1 | tee results/ncmoe32.log
+uv run python configs/bench.py --ncmoe 32 -o results/ncmoe32.json
 
 # Config 3: Default UVM (no policy)
-GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench \
-  -m ~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  2>&1 | tee results/uvm_baseline.log
+uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 
 # Config 4: UVM + user hints (cudaMemAdvise)
-GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench \
-  -m ~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  2>&1 | tee results/uvm_user_hint.log
 # (requires llama.cpp built with cudaMemAdvise hints enabled)
+uv run python configs/bench.py --uvm -o results/uvm_user_hint.json
 
-# Config 5: UVM + gpu_ext eBPF (stride prefetch + LFU eviction)
-# First load policies:
+# Config 5: UVM + gpu_ext eBPF (load policies first, then same --uvm flag)
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/prefetch_stride.bpf.o
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/eviction_lfu.bpf.o
-GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 ./build/bin/llama-bench \
-  -m ~/.cache/llama.cpp/ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  2>&1 | tee results/uvm_ebpf.log
+uv run python configs/bench.py --uvm -o results/uvm_ebpf.json
 ```
 
-Or use the Makefile shortcut:
+For 10-trial runs with geomean aggregation:
 ```bash
-make bench-120b-uvm   # runs 3 trials with UVM
+cd workloads
+python scripts/run_trials.py --trials 10 \
+  --command "uv run --directory llama.cpp python configs/bench.py --uvm" \
+  --results-dir llama.cpp/results/exp1/uvm_baseline/
 ```
 
 ### Expected Output
@@ -158,7 +175,7 @@ Key metrics: `pp512` = prefill throughput (tok/s), `tg128` = decode throughput (
 ### Generate Figure
 
 ```bash
-cd uvm && python visbasic.py   # produces llama_uvm_combined_color.pdf
+cd workloads/llama.cpp/uvm && python visbasic.py   # produces llama_uvm_combined_color.pdf
 ```
 
 ### Reference Results (RTX 5090)
@@ -182,9 +199,9 @@ cd uvm && python visbasic.py   # produces llama_uvm_combined_color.pdf
 ```bash
 cd workloads/vllm
 
-# Create venv and install vLLM
-uv venv && source .venv/bin/activate
-uv pip install vllm
+# Create venv and install vLLM from local source (with UVM support)
+uv sync
+uv pip install -e ~/workspace/vllm
 
 # Download dataset (if not present)
 make download-datasets
@@ -193,37 +210,32 @@ make download-datasets
 
 ### Run Benchmarks
 
-The primary script compares 3 baselines automatically:
+Using the atomic script `configs/serve_bench.py`:
 
 ```bash
-python uvm/test_uvm_baselines.py \
-  --bench-args "--model Qwen/Qwen3-30B-A3B-FP8 \
-    --dataset-name sharegpt \
-    --num-prompts 100 \
-    --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
-    --sharegpt-output-len 512 \
-    --seed 42 --request-rate 5" \
-  --baselines cpu_offload uvm_baseline \
-  --output-dir results
-```
+cd workloads/vllm
 
-For the gpu_ext UVM + eBPF configuration, load policies first then run:
-```bash
-# Load gpu_ext sequential prefetch policy
+# Config 1: CPU offload (8GB)
+uv run python configs/serve_bench.py --mode cpu_offload -o results/cpu_offload.json
+
+# Config 2: UVM baseline (no policy)
+uv run python configs/serve_bench.py --mode uvm -o results/uvm_baseline.json
+
+# Config 3: UVM + gpu_ext eBPF (load policies first, then same --mode uvm)
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/prefetch_adaptive_sequential.bpf.o
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/eviction_lfu.bpf.o
-
-# Run UVM baseline with eBPF active
-python uvm/test_uvm_baselines.py \
-  --bench-args "--model Qwen/Qwen3-30B-A3B-FP8 \
-    --dataset-name sharegpt --num-prompts 100 \
-    --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
-    --sharegpt-output-len 512 --seed 42 --request-rate 5" \
-  --baselines uvm_baseline \
-  --output-dir results
+uv run python configs/serve_bench.py --mode uvm -o results/uvm_ebpf.json
 ```
 
-**Note**: `test_uvm_baselines.py` defaults to `~/workspace/vllm` for vLLM and `~/workspace/gpu/LMCache` for LMCache. Override via `VLLM_SERVER_DIR` and `LMCACHE_SERVER_DIR` environment variables. Dataset path defaults to `datasets/ShareGPT_V3_unfiltered_cleaned_split.json` (relative to the vllm workload directory).
+For 10-trial runs:
+```bash
+cd workloads
+python scripts/run_trials.py --trials 10 \
+  --command "uv run --directory vllm python configs/serve_bench.py --mode cpu_offload" \
+  --results-dir vllm/results/exp2/cpu_offload/
+```
+
+**Note**: `serve_bench.py` defaults to `~/workspace/vllm` for vLLM server. Override via `VLLM_SERVER_DIR` environment variable.
 
 ### Expected Output
 
@@ -270,44 +282,31 @@ No external dataset needed — graphs are randomly generated.
 
 ### Run Benchmarks
 
-Three scripts for three configurations (results stored in separate dirs):
+Using the atomic script `configs/gnn.py`:
 
-**Script 1: No UVM baseline (pure GPU, OOMs beyond ~7M nodes)**
 ```bash
-for NODES in 1000000 3000000 5000000 7000000; do
-  uv run python benchmark_gnn_uvm.py --dataset random --nodes $NODES \
-    --edges_per_node 10 --features 128 --hidden 256 \
-    --epochs 2 --warmup 1 --prop chunked --use_gpu_allocator \
-    --report_json without-user-prefetch/result_no_uvm1/${NODES}.json
-done
-```
+cd workloads/pytorch
 
-**Script 2: UVM baseline (default driver, no eBPF)**
-```bash
-for NODES in 5000000 7000000 8000000 10000000 12000000 15000000; do
-  CUDA_MANAGED_FORCE_DEVICE_ALLOC=1 uv run python benchmark_gnn_uvm.py \
-    --dataset random --nodes $NODES \
-    --edges_per_node 10 --features 128 --hidden 256 \
-    --epochs 2 --warmup 1 --prop chunked --use_uvm \
-    --report_json without-user-prefetch/result_uvm_baseline1/${NODES}.json
-done
-```
+# No UVM baseline (pure GPU, OOMs beyond ~7M nodes)
+uv run python configs/gnn.py --nodes 5000000 -o results/gnn_5M_normal.json
 
-**Script 3: UVM + gpu_ext eBPF (load policies first)**
-```bash
-# Load sequential prefetch policy
+# UVM baseline (default driver, no eBPF)
+uv run python configs/gnn.py --nodes 10000000 --uvm -o results/gnn_10M_uvm.json
+
+# UVM + gpu_ext eBPF (load policies first, then same --uvm flag)
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/prefetch_adaptive_sequential.bpf.o
-
-for NODES in 5000000 7000000 8000000 10000000 12000000 15000000; do
-  CUDA_MANAGED_FORCE_DEVICE_ALLOC=1 uv run python benchmark_gnn_uvm.py \
-    --dataset random --nodes $NODES \
-    --edges_per_node 10 --features 128 --hidden 256 \
-    --epochs 2 --warmup 1 --prop chunked --use_uvm \
-    --report_json without-user-prefetch/result_uvm_ebpf1/${NODES}.json
-done
+uv run python configs/gnn.py --nodes 10000000 --uvm -o results/gnn_10M_uvm_ebpf.json
 ```
 
-Repeat all three with `--use_uvm` (which enables `cudaMemPrefetchAsync` in the allocator) for the "with-user-prefetch" variant, saving to `with-user-prefetch/` subdirectories.
+For 10-trial runs across node counts:
+```bash
+cd workloads
+for NODES in 5000000 7000000 8000000 10000000 12000000 15000000; do
+  python scripts/run_trials.py --trials 10 \
+    --command "uv run --directory pytorch python configs/gnn.py --nodes $NODES --uvm" \
+    --results-dir pytorch/result/exp3/uvm_${NODES}/
+done
+```
 
 ### Expected Output
 
@@ -350,6 +349,9 @@ python visualize_all.py
 ```bash
 cd workloads/faiss
 
+# Create venv and install Python deps
+uv sync
+
 # Build FAISS from submodule
 git submodule update --init faiss
 cd faiss
@@ -361,42 +363,37 @@ cmake -B build \
   -DBUILD_TESTING=OFF \
   -DBLA_VENDOR=OpenBLAS
 make -C build -j$(nproc) swigfaiss
-cd build/faiss/python && pip install -e .
-cd ../../../../
+cd ..
 
-# Create venv
-uv venv && source .venv/bin/activate
-uv pip install "numpy<2.0"
+# Install FAISS from local build into the venv
+uv pip install -e faiss/build/faiss/python/
 
 # Download SIFT dataset
-# The SIFT1B dataset must be placed at faiss/benchs/bigann/
-# Download from: http://corpus-texmex.irisa.fr/
-# Required files:
-#   bigann_base.bvecs  (46 GB for 375M vectors)
-#   bigann_learn.bvecs (13 GB for 100M training vectors)
-#   bigann_query.bvecs (1.3 MB for 10K queries)
-#   gnd/               (ground truth files)
+bash download_sift.sh
 ```
 
 ### Run Benchmarks
 
+Using the atomic script `configs/search.py`:
+
 ```bash
-# SIFT50M - UVM baseline (no eBPF)
-uv run python bench_gpu_1bn.py SIFT50M IVF4096,Flat -nprobe 1,4,16 -uvm \
-  2>&1 | tee results/SIFT50M_uvm_baseline.log
+cd workloads/faiss
 
-# SIFT100M - UVM baseline
-uv run python bench_gpu_1bn.py SIFT100M IVF4096,Flat -nprobe 1,4,16 -uvm \
-  2>&1 | tee results/SIFT100M_uvm_baseline.log
+# UVM baseline (no eBPF)
+uv run python configs/search.py --dataset SIFT50M --uvm -o results/sift50m_uvm.json
+uv run python configs/search.py --dataset SIFT100M --uvm -o results/sift100m_uvm.json
 
-# SIFT50M - UVM + gpu_ext eBPF (load adaptive prefetch policy first)
+# UVM + gpu_ext eBPF (load policies first, then same --uvm flag)
 sudo bpftool struct_ops register /path/to/gpu_ext/extension/prefetch_adaptive_sequential.bpf.o
-uv run python bench_gpu_1bn.py SIFT50M IVF4096,Flat -nprobe 1,4,16 -uvm \
-  2>&1 | tee results/SIFT50M_uvm_ebpf.log
+uv run python configs/search.py --dataset SIFT100M --uvm -o results/sift100m_uvm_ebpf.json
+```
 
-# SIFT100M - UVM + gpu_ext eBPF
-uv run python bench_gpu_1bn.py SIFT100M IVF4096,Flat -nprobe 1,4,16 -uvm \
-  2>&1 | tee results/SIFT100M_uvm_ebpf.log
+For 10-trial runs:
+```bash
+cd workloads
+python scripts/run_trials.py --trials 10 \
+  --command "uv run --directory faiss python configs/search.py --dataset SIFT100M --uvm" \
+  --results-dir faiss/results/exp4/sift100m_uvm/
 ```
 
 ### Expected Output
@@ -535,14 +532,12 @@ Scripts in `microbench/memory/`.
 
 ## Path Configuration
 
-Scripts use relative paths by default. Override via environment variables or Makefile variables when needed:
+Scripts use relative paths by default. Override via environment variables when needed:
 
 | Variable | Used By | Default | Description |
 |----------|---------|---------|-------------|
-| `VLLM_SERVER_DIR` | `vllm/uvm/test_uvm_baselines.py` | `~/workspace/vllm` | vLLM installation directory |
-| `LMCACHE_SERVER_DIR` | `vllm/uvm/test_uvm_baselines.py` | `~/workspace/gpu/LMCache` | LMCache installation directory |
-| `DATASET_PATH` | `vllm/uvm/test_uvm_baselines.py` | `datasets/ShareGPT_V3_...json` | ShareGPT dataset path |
-| `VENV` | `vllm/Makefile` | `.venv/bin/activate` | Python venv activate script |
+| `VLLM_SERVER_DIR` | `vllm/configs/serve_bench.py` | `~/workspace/vllm` | vLLM installation directory |
+| `DATASET_PATH` | `vllm/configs/serve_bench.py` | `datasets/ShareGPT_V3_...json` | ShareGPT dataset path |
 | `MODEL_120B_CACHE` | `llama.cpp/Makefile` | `$HOME/.cache/llama.cpp/...` | GPT-OSS-120B model path |
 
 ---
@@ -553,24 +548,24 @@ All experiments must strictly follow the paper configurations. Each experiment h
 
 ### Software Versions (Paper §6.1)
 
-| Software | Paper Version | Notes |
-|----------|--------------|-------|
-| PyTorch | 2.9.0 | with custom UVM/GPU allocator |
-| vLLM | 0.11.0 | with custom UVM allocator |
+| Software | Version | Notes |
+|----------|---------|-------|
+| PyTorch | 2.10.0+cu128 | with custom UVM/GPU allocator |
+| vLLM | 0.11.0rc2 | local UVM fork (`~/workspace/vllm`) |
 | llama.cpp | build 7101 (commit 65b578b1) | eunomia-bpf/llama.cpp fork |
 | Faiss | 1.13.0 | eunomia-bpf/faiss fork |
-| CUDA | 12.9 | Driver 575.57.08 |
+| CUDA | 12.8 | Driver 570.133.20 |
 
 All tests: **10 trials, geometric mean** unless otherwise specified.
 
 ### Experiment → Figure/Table Mapping
 
-| # | Experiment | Paper | Model/Dataset | Run Script | Needs Modified KM? |
-|---|-----------|-------|---------------|------------|-------------------|
-| 1 | llama.cpp Expert Offloading | RQ1, Fig 6 | GPT-OSS-120B (59 GiB) | `llama.cpp/run_exp1_expert_offload.sh` | Configs 4-5 only |
-| 2 | vLLM KV-cache Offloading | RQ1, Fig 7 | Qwen3-30B-A3B-FP8 (~30GB) | `vllm/run_exp2_kv_offload.sh` | Config 3 only |
-| 3 | PyTorch GNN Training | RQ1, Fig 8 | Random graphs 1M-15M nodes | `pytorch/run_exp3_gnn.sh` | Configs 4-5 only |
-| 4 | FAISS Vector Search | RQ1, Fig 9 | SIFT 20M/50M/100M | `faiss/run_exp4_vector_search.sh` | Config 2 only |
+| # | Experiment | Paper | Model/Dataset | Atomic Script | Needs Modified KM? |
+|---|-----------|-------|---------------|---------------|-------------------|
+| 1 | llama.cpp Expert Offloading | RQ1, Fig 6 | GPT-OSS-120B (59 GiB) | `llama.cpp/configs/bench.py` | Configs 4-5 only |
+| 2 | vLLM KV-cache Offloading | RQ1, Fig 7 | Qwen3-30B-A3B-FP8 (~30GB) | `vllm/configs/serve_bench.py` | Config 3 only |
+| 3 | PyTorch GNN Training | RQ1, Fig 8 | Random graphs 1M-15M nodes | `pytorch/configs/gnn.py` | Configs 4-5 only |
+| 4 | FAISS Vector Search | RQ1, Fig 9 | SIFT 20M/50M/100M | `faiss/configs/search.py` | Config 2 only |
 | 5 | Two-Tenant Co-location | RQ2, Fig 12 | llama.cpp 20B + GNN 8M | `llama.cpp/run_exp5_two_tenant.sh` | gpu_ext config only |
 | 6 | Compute-bound Scheduler | RQ2, Fig 10 | 2LC+4BE processes | (microbench) | Yes |
 | 7 | Memory-bound Priority | RQ2, Fig 11 | HotSpot/GEMM/K-Means | (microbench) | Yes |
@@ -613,13 +608,13 @@ All tests: **10 trials, geometric mean** unless otherwise specified.
 
 ### Baseline Configs (Runnable Without Modified KM)
 
-| Experiment | Runnable Configs | Script |
-|-----------|-----------------|--------|
-| llama.cpp | 1 (ncmoe=64), 2 (ncmoe=32), 3 (UVM baseline) | `run_exp1_expert_offload.sh` |
-| vLLM | 1 (cpu_offload), 2 (uvm_baseline), 4 (lmcache) | `run_exp2_kv_offload.sh` |
-| PyTorch GNN | 1 (native GPU), 2 (UVM baseline), 3 (UVM+prefetch) | `run_exp3_gnn.sh` |
-| FAISS | 1 (UVM baseline) | `run_exp4_vector_search.sh` |
-| Two-Tenant | 1 (default UVM) | `run_exp5_two_tenant.sh` |
+| Experiment | Runnable Configs | Atomic Script |
+|-----------|-----------------|---------------|
+| llama.cpp | 1 (ncmoe=64), 2 (ncmoe=32), 3 (UVM baseline) | `llama.cpp/configs/bench.py` |
+| vLLM | 1 (cpu_offload), 2 (uvm_baseline), 4 (lmcache) | `vllm/configs/serve_bench.py` |
+| PyTorch GNN | 1 (native GPU), 2 (UVM baseline), 3 (UVM+prefetch) | `pytorch/configs/gnn.py` |
+| FAISS | 1 (UVM baseline) | `faiss/configs/search.py` |
+| Two-Tenant | 1 (default UVM) | `llama.cpp/run_exp5_two_tenant.sh` |
 
 ### Reference Results (Paper, RTX 5090)
 
@@ -675,7 +670,7 @@ The following items are needed to fully reproduce all experiments but are not ye
 | GPT-OSS-120B model | llama.cpp (Exp 1) | ~59 GiB | `huggingface-cli download ggml-org/gpt-oss-120b-GGUF` |
 | Qwen3-30B-A3B-FP8 model | vLLM (Exp 2) | ~30 GB | Auto-downloaded by vLLM on first run |
 | SIFT1B dataset | Faiss (Exp 4) | ~60 GB | `bash faiss/download_sift.sh` |
-| vLLM (modified for UVM) | vLLM (Exp 2) | — | `uv pip install vllm` |
+| vLLM (modified for UVM) | vLLM (Exp 2) | — | `uv pip install -e ~/workspace/vllm` (local UVM fork) |
 | LMCache | vLLM baseline (Exp 2) | — | Clone from github.com/LMCache/LMCache |
 | HotSpot/GEMM/K-Means | Multi-tenant microbench (Exp 7) | small | From Rodinia/PolyBench/UVMBench |
 | cuda-samples vector-add | Device microbench (Exp 8) | small | From NVIDIA cuda-samples |
