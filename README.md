@@ -2,8 +2,6 @@
 
 Extending Linux GPU drivers with eBPF for programmable memory offloading and scheduling.
 
-> WIP, not ready yet!
-
 ## Overview
 
 Modern GPU workloads (LLM inference, vector databases, DNN training) exhibit diverse memory access patterns and scheduling requirements. However, GPU drivers use fixed, one-size-fits-all policies that cannot adapt to workload-specific needs.
@@ -19,29 +17,137 @@ Inspired by Linux kernel's `sched_ext`, gpu_ext brings the same extensibility to
 ## Structure
 
 ```
-├── src/              # eBPF policies and userspace loaders
-├── kernel-module/    # Modified GPU kernel modules with eBPF hooks (NVIDIA, AMD, etc.)
-├── libbpf/           # libbpf submodule
-├── bpftool/          # bpftool submodule
-├── vmlinux/          # vmlinux headers
-├── docs/             # Documentation
-└── microbench/       # Microbenchmarks
+├── extension/          # eBPF policies, userspace loaders, trace tools
+├── kernel-module/      # Modified NVIDIA kernel modules with eBPF hooks
+│   └── nvidia-module/  #   NVIDIA Open GPU Kernel Modules v575.57.08
+├── workloads/          # Benchmark workloads (llama.cpp, vLLM, PyTorch, FAISS)
+├── libbpf/             # libbpf submodule
+├── bpftool/            # bpftool submodule
+├── vmlinux/            # vmlinux BTF headers
+├── microbench/         # Microbenchmarks (compute/memory)
+├── scripts/            # Shared utilities
+├── tools/              # Helper tools
+└── docs/               # Documentation
 ```
 
-**Policies in src/**:
-- Memory eviction policies (FIFO, LFU, MRU, PID-based, etc.)
-- Prefetch policies (sequential, stride, adaptive, etc.)
-- Scheduling policies (timeslice, priority)
-- Tracing tools
+**Policies in `extension/`**:
+
+| Category | Policies |
+|----------|----------|
+| Eviction | FIFO, LFU, MRU, PID-quota, freq-decay, FIFO-chance |
+| Prefetch | none, always-max, adaptive-sequential, stride, PID-tree |
+| Scheduling | timeslice control, preemption control |
+| Tracing | chunk_trace, prefetch_trace, gpu_sched_trace |
+
+## Prerequisites
+
+```bash
+# Ubuntu 22.04+
+sudo apt-get install -y --no-install-recommends \
+    build-essential gcc g++ make \
+    clang llvm \
+    libelf1 libelf-dev zlib1g-dev \
+    pkg-config
+
+# Or use the Makefile shortcut:
+make install
+```
+
+Additional requirements:
+- **Kernel module build**: Linux kernel headers (`linux-headers-$(uname -r)`), CUDA 12.8+
+- **Workloads**: Python 3.12+ with [`uv`](https://docs.astral.sh/uv/) package manager
+- **Nix users**: `nix develop` provides a ready-to-use shell environment
 
 ## Build
 
-```sh
-# Install dependencies (Ubuntu)
-make install
+### 1. Build eBPF Policies
 
-# Build all policies
-make build
+```bash
+make build    # Compiles all BPF policies + userspace loaders
+```
+
+This builds libbpf and bpftool from submodules, then compiles each `.bpf.c` policy into BPF bytecode (`.bpf.o`) and a userspace loader binary. Output is in `extension/.output/`.
+
+### 2. Build Kernel Module
+
+The modified NVIDIA kernel module (based on Open GPU Kernel Modules v575.57.08) adds BPF struct_ops hook points to `nvidia-uvm` for memory management and to `nvidia` for GPU scheduling.
+
+```bash
+cd kernel-module/nvidia-module
+
+# Stage 1: Build OS-agnostic driver code
+make -C src/nvidia
+make -C src/nvidia-modeset
+
+# Stage 2: Build kernel modules via Kbuild
+make modules -j$(nproc)
+```
+
+Output:
+```
+kernel-open/nvidia.ko
+kernel-open/nvidia-modeset.ko
+kernel-open/nvidia-drm.ko
+kernel-open/nvidia-uvm.ko      # Contains eBPF hooks
+```
+
+### 3. Load Custom Kernel Module
+
+Replace the system NVIDIA modules with the custom-built ones (temporary, reverts on reboot):
+
+```bash
+# Unload system modules
+sudo systemctl stop nvidia-persistenced 2>/dev/null || true
+sudo systemctl stop gdm3 2>/dev/null || true
+sleep 2
+sudo rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
+
+# Load custom modules (in dependency order)
+sudo insmod kernel-module/nvidia-module/kernel-open/nvidia.ko
+sudo insmod kernel-module/nvidia-module/kernel-open/nvidia-modeset.ko
+sudo insmod kernel-module/nvidia-module/kernel-open/nvidia-drm.ko
+sudo insmod kernel-module/nvidia-module/kernel-open/nvidia-uvm.ko
+
+# Restart display manager
+sudo systemctl start gdm3 2>/dev/null || true
+
+# Verify
+lsmod | grep nvidia
+```
+
+For permanent installation and troubleshooting, see [docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md](docs/driver_docs/MODULE_LOAD_UNLOAD_GUIDE.md).
+
+### 4. Load an eBPF Policy
+
+With the custom kernel module loaded, attach a policy:
+
+```bash
+# Run a policy loader (stays in foreground, Ctrl-C to detach)
+sudo ./extension/prefetch_adaptive_sequential
+
+# Or run in background
+sudo ./extension/eviction_lfu &
+
+# Verify eBPF programs are attached
+sudo bpftool prog list | grep struct_ops
+```
+
+## Workloads
+
+Benchmark workloads for reproducing the paper experiments. See [`workloads/README.md`](workloads/README.md) for full setup and instructions.
+
+| Workload | Paper | Description |
+|----------|-------|-------------|
+| llama.cpp | RQ1, Fig 6 | MoE expert offloading (GPT-OSS-120B, 59 GiB) |
+| vLLM | RQ1, Fig 7 | KV-cache offloading (Qwen3-30B-A3B-FP8) |
+| PyTorch | RQ1, Fig 8 | GNN training with UVM oversubscription (1M-15M nodes) |
+| FAISS | RQ1, Fig 9 | Vector search on SIFT 20M/50M/100M |
+
+Quick start:
+```bash
+cd workloads/llama.cpp
+uv sync
+uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 ```
 
 ## Related
