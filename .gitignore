@@ -19,5 +19,8 @@ docs/driver_docs/sched/test/test_preempt_ctrl
 docs/driver_docs/sched/test/test_preempt_ioctl
 docs/driver_docs/sched/test/test_preempt_cuda
 
+# Extension binaries
+extension/prefetch_stride
+
 # External repositories
 docs/driver_docs/sched/GPreempt/

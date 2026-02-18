@@ -35,7 +35,7 @@ Inspired by Linux kernel's `sched_ext`, gpu_ext brings the same extensibility to
 | Category | Policies |
 |----------|----------|
 | Eviction | FIFO, LFU, MRU, PID-quota, freq-decay, FIFO-chance |
-| Prefetch | none, always-max, adaptive-sequential, stride, PID-tree |
+| Prefetch | none, always-max, adaptive-sequential, adaptive-tree-iter, stride, PID-tree, PID-eviction |
 | Scheduling | timeslice control, preemption control |
 | Tracing | chunk_trace, prefetch_trace, gpu_sched_trace |
 
@@ -66,7 +66,7 @@ Additional requirements:
 make build    # Compiles all BPF policies + userspace loaders
 ```
 
-This builds libbpf and bpftool from submodules, then compiles each `.bpf.c` policy into BPF bytecode (`.bpf.o`) and a userspace loader binary. Output is in `extension/.output/`.
+This builds libbpf and bpftool from submodules, then compiles each `.bpf.c` policy into BPF bytecode (`.bpf.o`) and a userspace loader binary. BPF objects and skeleton headers go to `extension/.output/`; loader binaries are placed directly in `extension/`.
 
 ### 2. Build Kernel Module
 
@@ -74,14 +74,10 @@ The modified NVIDIA kernel module (based on Open GPU Kernel Modules v575.57.08) 
 
 ```bash
 cd kernel-module/nvidia-module
-
-# Stage 1: Build OS-agnostic driver code
-make -C src/nvidia
-make -C src/nvidia-modeset
-
-# Stage 2: Build kernel modules via Kbuild
 make modules -j$(nproc)
 ```
+
+This runs two stages automatically: first builds OS-agnostic driver objects (`src/nvidia/`, `src/nvidia-modeset/`), then builds kernel modules via Kbuild.
 
 Output:
 ```
