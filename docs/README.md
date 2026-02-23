@@ -24,4 +24,5 @@ Cross-subsystem CPU-GPU resource coordination via sched_ext + gpu_ext + shared B
 
 | File | Description |
 |---|---|
-| [`xcoord_plan.md`](xcoord/xcoord_plan.md) | 完整分析：项目状态、核心洞察、系统架构、协调策略、可行性、评估设计、执行计划 |
+| [`xcoord_plan.md`](xcoord/xcoord_plan.md) | ✅ 完整分析与执行计划（零内核修改） |
+| [`bpf_core_access_findings.md`](xcoord/bpf_core_access_findings.md) | ✅ BPF CO-RE 发现（无需 kfunc） |
