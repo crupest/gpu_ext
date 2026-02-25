@@ -785,41 +785,68 @@ PID 2300571  fault_rate=2342  fault_cnt=2206  evict_cnt=1066340  used_cnt=367361
 - ✅ sched_ext 成功连接两个 map（`gpu_state_map`: preset fd=5, `uvm_worker_pids`: preset fd=6）
 - ⏳ 待验证：运行 llama-server 时 worker PID 是否被正确追踪 + gpu_boosted > 0
 
-**问题 2: llama-server 120B UVM 崩溃**
+**问题 2: llama-server 120B UVM 崩溃 — ✅ 已解决**
 
-最近的实验运行（2026-02-24）中，llama-server 在处理第一个推理请求时崩溃:
+2026-02-24 实验运行中，llama-server 在处理第一个推理请求时崩溃:
 ```
 CUDA error: out of memory
 → ggml_cuda_op_mul_mat_cublas() / launch_mul_mat_q()
-→ Backtrace: mul_mat → evaluate_and_capture_cuda_graph → graph_compute → decode
+→ slot update_slots: prompt done, n_tokens = 25 → OOM
 ```
 
-- **模型配置**: gpt-oss-120b-mxfp4 (~60GB)，GPU 仅 32GB，通过 UVM (cudaMallocManaged) 分配
-- **可能原因**: cuBLAS GEMM 需要额外 workspace buffer，在 GPU 显存已被 UVM 分配占满时 OOM
-  - 模型 buffer: 59851 MiB (UVM)
-  - KV cache: 2×144 MiB (UVM)
-  - Compute buffer: 1593 MiB (UVM)
-  - 总计 ~62GB via cudaMallocManaged，物理 GPU 仅 32GB
-  - cuBLAS workspace 可能无法分配
-- **之前的实验（2/23）没有崩溃**，相同配置能正常运行；可能是 GPU 状态/驱动状态差异
-- **与 xCoord 代码无关**: 仅加载模型 + 发送第一个请求就崩溃，还未涉及 xCoord 组件
-- **需要排查**: 自定义 nvidia_uvm 内核模块 vs 原版模块是否影响 UVM 行为
+**根因分析（2026-02-24 确认）**:
+
+问题是**残留 GPU 进程占用显存**，不是内核模块或 CUDA 版本问题。
+
+排查过程:
+1. `nvidia-smi` 发现两个残留 llama-server 进程（PID 89861, 92240），各占 552MiB
+2. GPU 内存 32108MiB / 32607MiB — 几乎满载
+3. 120B 模型约 60GB 通过 UVM (cudaMallocManaged) 分配，物理 GPU 32GB
+4. 模型加载成功（UVM 映射不需要物理显存），但推理时 cuBLAS workspace 无法分配
+5. 清理残留进程后 → GPU 0MiB → 120B 模型加载 + 推理正常
+
+**残留进程来源**:
+- PID 89861: 之前手动测试启动的 llama-server（未清理）
+- PID 92240: 通过 `nohup` 后台启动的 llama-server（用于验证模型加载）
+- poc1 实验脚本中的 `cleanup_gpu.py` 只清理当时的进程，不会清理之前手动启动的
+
+**时间线**:
+- 2/23: 实验成功（之前没有残留进程，GPU 干净）
+- 2/24 调试期间: 手动启动多次 llama-server 测试，未完全清理
+- 2/24 21:21: poc1 脚本启动 → cleanup_gpu.py 运行 → 此时残留进程已占用 GPU
+  → 新 llama-server 启动 → 模型 UVM 分配成功 → 推理时 cuBLAS OOM
+
+**验证**:
+```
+# 清理后测试
+$ nvidia-smi → 0MiB
+$ llama-server --gpt-oss-120b-default -c 4096 → 模型加载 70s → 健康检查通过
+$ curl /v1/chat/completions → 推理成功（TTFT 3612ms, 7.65 tok/s）
+```
+
+**预防措施**:
+- 实验脚本开头必须执行 `cleanup_gpu.py` **且验证 GPU 为 0MiB**
+- 手动调试后始终运行 `cleanup_gpu.py`
+- 考虑在实验脚本中加 `nvidia-smi --query-compute-apps=pid --format=csv,noheader` 验证
 
 #### 10.3.6 下一步工作
 
 **优先级排序**:
 
-1. **🔴 修复 llama-server 120B 崩溃问题**
-   - 排查: 卸载自定义 nvidia_uvm → 加载原版 → 测试 120B 是否稳定
-   - 若自定义模块导致: 检查 BPF hook 是否影响 UVM 内存管理
-   - 若原版也崩溃: 可能是 llama.cpp 版本/CUDA 版本问题，尝试降低 context size (`-c 2048`)
+1. ~~**🔴 修复 llama-server 120B 崩溃问题**~~ → ✅ 已解决（残留 GPU 进程占用显存）
 
-2. **🟡 验证 worker PID 追踪效果**
-   - 待 120B 稳定后，运行完整 POC-1 实验 (3 场景)
+2. **🔴 重写实验脚本使用标准 benchmark 工具**
+   - 当前 `poc1_xcoord_scheduling.sh` 手动用 bash 管理 llama-server + 调用 `vllm bench serve`
+   - 应该使用 `workloads/llama.cpp/configs/server_bench.py` 的方法论（`common.py` 工具函数）
+   - 需要解决：`server_bench.py` 内部管理 server 生命周期，但 xCoord 需要拿到 server PID 后启动 BPF 组件
+   - 方案：新建 `poc1_xcoord_bench.py`，import `common.py`，遵循同样方法论，加入 xCoord 生命周期
+
+3. **🟡 验证 worker PID 追踪效果**
+   - 运行完整 POC-1 实验 (3 场景)
    - 关键观察: `gpu_boosted > 0` 且 xCoord 场景 TTFT < CPU stress 场景
    - 如果 gpu_boosted 仍为 0: 检查 worker PID 是否在 track 时和 enqueue 时一致
 
-3. **🟢 考虑实验设计调整**
+4. **🟢 考虑实验设计调整**
    - 当前 120B baseline TTFT 已很高 (~3100ms)，CPU stress 仅额外增加 ~3%
    - 可能需要更激进的 CPU 干扰（如 `stress-ng -c $(nproc) --cpu-method matrixprod`）
    - 或尝试中等大小模型（如 30B-70B）让 UVM paging 更可控
@@ -963,11 +990,12 @@ Week 2: POC-1 实现 (2026-02-23 ~ 02-24) ← 当前阶段
   ├─ ✅ Day 1: 实验运行 1 — 发现 SCX_ENUM_INIT 缺失，修复
   ├─ ✅ Day 1: 实验运行 2 — 发现 worker PID 不匹配，实现 worker 追踪
   ├─ ✅ Day 2: Worker 追踪代码完成 + 编译通过 + 单元测试通过
-  ├─ ⚠️ Day 2: 实验运行 3 — llama-server 120B CUDA OOM 崩溃
-  └─ ⏳ 待完成: 修复 OOM 问题 → 完整实验 → 验证 worker 追踪效果
+  ├─ ✅ Day 2: 实验运行 3 — llama-server 120B CUDA OOM 崩溃（根因: 残留 GPU 进程占显存）
+  ├─ ✅ Day 2: OOM 根因确认 — 残留 llama-server 进程(PID 89861, 92240)各占 552MiB，清理后推理正常
+  └─ ⏳ 待完成: 重写实验脚本(用 server_bench.py 方法论) → 完整实验 → 验证 worker 追踪效果
 
 Week 3: POC-1 验证 + POC-2
-  ├─ 修复 120B 环境问题，完成 worker 追踪验证实验
+  ├─ 重写实验脚本使用标准 benchmark 方法论，完成 worker 追踪验证实验
   ├─ POC-2: Ablation study (4 变体)
   └─ 分析结果，决定是否继续 POC-3
 
@@ -1055,7 +1083,7 @@ POC: 4-6 周 (Week 1-6)
 | sched_ext 导致系统不稳定 | 中 | ✅ **稳定** | state=enabled，安全 fallback 正常 |
 | 改善幅度不够发论文 | 中 | ⏳ **待验证** | worker 追踪修复后重测 |
 | **新增**: UVM worker PID 不匹配 | 未预见 | ⚠️ **已修复代码** | 核心线程 tgid ≠ 用户进程 tgid |
-| **新增**: 120B 模型 CUDA OOM | 未预见 | ⚠️ **待排查** | 之前能运行，可能是 GPU 状态问题 |
+| **新增**: 120B 模型 CUDA OOM | 未预见 | ✅ **已解决** | 根因: 残留 GPU 进程占显存 (2×552MiB)，清理后正常 |
 | **新增**: SCX 编译工具链兼容性 | 未预见 | ✅ **已解决** | clang 18 不支持 32-bit atomics → 避开 UEI |
 
 ### 12.2 技术经验总结（Lessons Learned from POC-1）
@@ -1081,9 +1109,13 @@ POC: 4-6 周 (Week 1-6)
 
 #### 12.2.3 实验环境注意事项
 
-- llama-server 120B 需要自定义 nvidia_uvm 内核模块（支持 BPF hook），加载前需停止 gdm3 + 卸载系统 nvidia 模块
+- llama-server 120B 需要自定义 nvidia_uvm 内核模块（支持 BPF hook），加载前需停止 gdm3 + nvidia-persistenced + 卸载系统 nvidia 模块
 - 实验脚本不能用 `sudo bash script.sh` 运行（会导致 root 用户找不到缓存的模型文件），应让脚本内部 `sudo` 单独的 BPF 工具
-- 120B 模型 ~60GB via UVM，物理 GPU 32GB，cuBLAS workspace 可能触发 CUDA OOM — 可能需要降低 context size 或确保 GPU 状态干净
+- **GPU 进程残留是 OOM 首因**：120B 模型 ~60GB via UVM，物理 GPU 32GB，显存已被 UVM 映射填满。任何残留 GPU 进程（哪怕只占 500MiB）都会导致 cuBLAS workspace 分配 OOM
+  - 调试/测试后必须运行 `cleanup_gpu.py`
+  - 实验脚本开头应验证 GPU 内存为 0MiB（`nvidia-smi --query-compute-apps=pid --format=csv,noheader` 应无输出）
+  - 手动启动的 `nohup llama-server &` 进程容易遗忘，是最常见的残留来源
+- 使用标准 benchmark 工具 (`server_bench.py` + `common.py`) 可避免服务器生命周期管理问题
 
 ### 12.3 Fallback 方案
 

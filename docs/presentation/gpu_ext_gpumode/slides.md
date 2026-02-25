@@ -61,12 +61,12 @@ eunomia-bpf community
 
 ### Our Exploration
 
-**gpu_ext**: Extending GPU Driver with eBPF
-   - Memory & Scheduling struct_ops for resource management
-
 **Device eBPF**: Offloading eBPF to GPU (bpftime)
    - Observability Tools and probes
    - Prefetch & Schedule (?)
+
+**gpu_ext**: Extending GPU Driver with eBPF
+   - Memory & Scheduling struct_ops for resource management
 
 **Cross-layer Coordination**
    - Cross Device eBPF Maps
@@ -283,7 +283,7 @@ eunomia-bpf community
 
 <div class="border-l-4 border-blue-500 pl-3">
 
-**User-space Runtimes** (vLLM, Sglang, ktransformer) and 
+**User-space Runtimes** (vLLM, Sglang, ktransformer) and
 **Userspace shims** (XSched..)
 - Application-bound
 - No cross-tenant visibility and control
@@ -312,6 +312,139 @@ eunomia-bpf community
 **Host eBPF**
 - GPU device remains a black box
 - No programmable hooks in GPU driver for control
+
+</div>
+
+</div>
+
+---
+
+# What is eBPF?
+
+<div class="flex flex-col items-center">
+
+<div class="text-lg mb-4">
+Safe, dynamic, verified programs that extend the Linux kernel — <b>without modifying kernel source</b>
+</div>
+
+<img src="/ebpf.png" class="rounded shadow-lg" style="max-height: 320px;" alt="eBPF Overview" />
+
+<div class="flex gap-6 mt-6 text-base">
+<div class="px-3 py-1 bg-blue-100 rounded text-blue-700 font-semibold">Networking</div>
+<div class="px-3 py-1 bg-green-100 rounded text-green-700 font-semibold">Security</div>
+<div class="px-3 py-1 bg-orange-100 rounded text-orange-700 font-semibold">Observability</div>
+<div class="px-3 py-1 bg-purple-100 rounded text-purple-700 font-semibold">Scheduling</div>
+<div class="px-3 py-1 bg-red-100 rounded text-red-700 font-bold">GPU?</div>
+</div>
+
+<div class="text-xs mt-3 opacity-50">Source: ebpf.io</div>
+
+</div>
+
+---
+
+# Why eBPF?
+
+<div class="grid grid-cols-2 gap-6">
+
+<div class="border-2 border-blue-500 rounded-lg p-4">
+
+### Proven in Traditional Systems
+
+- **sched_ext**: custom CPU schedulers via eBPF
+  - Linux 6.12 mainline (2024), Meta & Google production
+- **XDP**: programmable packet processing
+- **LSM hooks**: dynamic security policies
+- Hot-loadable: change policy **without rebooting**
+- **Safety**: policy advises, kernel decides
+
+| Subsystem | eBPF Extension |
+|-----------|---------------|
+| CPU scheduling | **sched_ext** |
+| Network | XDP, TC |
+| Security | LSM hooks |
+| **GPU driver** | **gpu_ext (ours)** |
+
+</div>
+
+<div class="border-2 border-green-500 rounded-lg p-4">
+
+### Same Problem in GPU
+
+GPU driver has **hardcoded** policies:
+- Memory eviction: always **LRU**
+- Prefetching: always **tree-based**
+- Scheduling: always **round-robin**
+- No per-workload / per-tenant differentiation
+
+**Same problem as CPU scheduling before sched_ext**
+
+### eBPF Makes Them Programmable
+
+- **Driver-side** (gpu_ext): hooks in GPU driver
+  - Custom eviction, prefetch, scheduling
+- **Device-side** (bpftime): eBPF ON the GPU
+  - Fine-grained profiling (3-14% overhead vs NVBit 85-93%)
+- **No app modifications** needed
+
+</div>
+
+</div>
+
+---
+
+# How to Write eBPF
+
+<div class="grid grid-cols-2 gap-4">
+
+<div class="text-xs">
+
+```c
+// Define shared data structure (Map)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, u32);
+    __type(value, u64);
+} call_counts SEC(".maps");
+
+// Attach to kernel function (Hook)
+SEC("kprobe/do_sys_open")
+int count_opens(struct pt_regs *ctx) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u64 *count = bpf_map_lookup_elem(
+        &call_counts, &pid);
+    if (count)
+        (*count)++;
+    else {
+        u64 init = 1;
+        bpf_map_update_elem(
+            &call_counts, &pid, &init, BPF_ANY);
+    }
+    return 0;
+}
+```
+
+</div>
+
+<div class="text-sm">
+
+### Core Concepts
+
+- **Programs**: small C → eBPF bytecode (clang/LLVM)
+- **Hooks**: attach to kernel functions, tracepoints, etc.
+- **Maps**: shared key-value data (kernel ↔ userspace)
+- **Helpers**: safe kernel API (`bpf_get_current_pid_tgid`, `bpf_ktime_get_ns`, ...)
+- **Verifier**: guarantees safety before execution
+  - No crashes, no infinite loops, bounded memory
+
+### Analogy for GPU Devs
+
+Think of it like **CUPTI callbacks**, but:
+- You write **your own logic** (not just read events)
+- **Dynamically attach** without restarting
+- **Verified safe** — kernel guarantees no harm
+- Can **modify behavior**, not just observe
 
 </div>
 
@@ -359,22 +492,9 @@ Need to extend eBPF to GPU device contexts
 
 <div class="grid grid-cols-2 gap-8 mt-4">
 
-<div class="border-2 border-blue-500 rounded-lg p-4">
-
-### Part 1: gpu_ext
-
-**Extending Linux GPU Driver with eBPF**
-
-- Add eBPF attach points to GPU driver
-- Memory management hooks in UVM
-- Scheduling interface hooks with TSG
-- Uses standard eBPF verifier + struct_ops
-
-</div>
-
 <div class="border-2 border-green-500 rounded-lg p-4">
 
-### Part 2: Device eBPF
+### Part 1: Device eBPF
 
 **Running eBPF on GPU Device (bpftime)**
 
@@ -385,6 +505,19 @@ Need to extend eBPF to GPU device contexts
 
 </div>
 
+<div class="border-2 border-blue-500 rounded-lg p-4">
+
+### Part 2: gpu_ext
+
+**Extending Linux GPU Driver with eBPF**
+
+- Add eBPF attach points to GPU driver
+- Memory management hooks in UVM
+- Scheduling interface hooks with TSG
+- Uses standard eBPF verifier + struct_ops
+
+</div>
+
 </div>
 
 ---
@@ -392,7 +525,296 @@ layout: center
 class: text-center
 ---
 
-# Part 1: gpu_ext
+# Part 1: Device eBPF
+
+Running eBPF on GPU Device (bpftime)
+
+---
+
+# GPU Execution Model Background
+
+<div class="grid grid-cols-2 gap-6">
+
+<div class="text-base">
+
+### SIMT Recap (Why It Matters for eBPF)
+
+- **Warp** (32 threads) executes in lockstep
+- Different branches → **serialization (Divergence)**
+- This means: naive per-thread eBPF would cause divergence & waste
+
+### Thread Hierarchy
+
+Thread → Warp (32) → Block → Grid → SM
+
+</div>
+
+<div>
+
+### Key Differences from CPU eBPF
+
+| Feature | CPU | GPU |
+|---------|-----|-----|
+| Thread count | Tens | Tens of thousands |
+| Scheduling unit | Single thread | Warp (32 threads) |
+| Branch handling | Prediction | Serialization |
+| Memory model | Coherent | Hierarchical (Reg→Shared→L1→L2→HBM) |
+
+**Challenge**: eBPF assumes scalar execution — GPU is SIMT
+
+</div>
+
+</div>
+
+---
+
+# What Can GPU eBPF Do?
+
+<div class="grid grid-cols-2 gap-6">
+
+<div class="text-base">
+
+### Fine-grained Profiling
+
+- Instruction-level observability
+- Per-thread/warp/SM metrics
+- Memory access pattern detection
+
+### Runtime Adaptation
+
+- Respond to device state
+- Safe and Dynamic policy adjustment in GPU kernel
+
+### Help Host-side Policies
+
+- Provide device visibility/controlility to host
+- Cross-layer coordination
+
+</div>
+
+<div>
+
+### e.g. SM Load Imbalance Trace
+
+<img src="/sm thread sched.png" class="rounded shadow-lg" style="max-height: 240px;" />
+
+**127x** difference observed between SMs
+
+Traced by [bpftime/gpu/threadscheduling](https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu/threadscheduling)
+
+</div>
+
+</div>
+
+---
+
+# Example: launchlate - Kernel Launch Latency Profiler
+
+<div class="grid grid-cols-2 gap-4">
+
+<div class="text-xs">
+
+```c
+BPF_MAP_DEF(BPF_MAP_TYPE_ARRAY, launch_time);
+
+// CPU-side uprobe captures launch time
+SEC("uprobe/app:cudaLaunchKernel")
+int uprobe_launch(struct pt_regs *ctx) {
+    u64 ts_cpu = bpf_ktime_get_ns();
+    bpf_map_update_elem(&launch_time, &key, &ts_cpu, BPF_ANY);
+}
+
+// GPU-side kprobe captures execution start
+SEC("kprobe/_Z9vectorAddPKfS0_Pf")
+int kprobe_exec() {
+    u64 ts_gpu = bpf_get_globaltimer();
+    u64 *ts_cpu = bpf_map_lookup_elem(&launch_time, &key);
+    u64 latency = ts_gpu - *ts_cpu;
+    // Update histogram...
+}
+```
+
+</div>
+
+<div class="text-sm">
+
+### Problem
+
+CUPTI shows kernel "started" quickly, but it's slow. Why?
+
+**Hidden issue**: Thread blocks competing for SMs with other kernels (multi-process, multi-stream)
+
+- **CUPTI sees**: Kernel start/end time (looks fine)
+- **Reality**: Many blocks waiting for SM resources
+- **bpftime**: Per-thread block/warp scheduling timestamp inside kernel
+
+### How It Works
+
+1. **CPU uprobe**: Record T1 at `cudaLaunchKernel()`
+2. **GPU kprobe**: Record T2 **per-thread block** at kernel entry
+3. See **when each thread block gets scheduled**
+
+
+[bpftime/gpu/launchlate](https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu/launchlate)
+
+</div>
+
+</div>
+
+---
+
+# Performance: Observability Tools Overhead
+
+Tested on a P40 GPU with llama.cpp 1B inference.
+
+| Tool | LOC | bpftime | NVBit |
+|------|-----|---------|-------|
+| kernelretsnoop | 153 | **8%** | 85% |
+| threadhist | 89 | **3%** | 87% |
+| launchlate | 347 | **14%** | 93% |
+
+**Key**: Warp-uniform execution achieves **3-14%** overhead vs NVBit's **85-93%**
+
+---
+
+# bpftime Architecture (With GPU)
+
+<div class="flex justify-center">
+
+<img src="/bpftime.png" class="rounded shadow-lg" style="max-height: 420px;" alt="Device eBPF Architecture" />
+
+</div>
+
+---
+
+# Instrumentation: Fatbin Hook & PTX Injection
+
+<div class="flex justify-center">
+
+<img src="/fatbin.jpg" class="rounded shadow-lg" style="max-height: 420px;" alt="Fatbin Hook and PTX Injection" />
+
+</div>
+
+---
+
+# PTX Injection: Patching & Wrapping
+
+<div class="flex justify-center">
+
+<img src="/injection.png" class="rounded shadow-lg" style="max-height: 420px;" alt="PTX Injection Details" />
+
+</div>
+
+---
+
+# bpftime GPU Support: Maps, Helpers, Attach Types
+
+<div class="grid grid-cols-3 gap-3 text-xs">
+
+<div class="border rounded p-2">
+
+### Attach Types (3)
+
+User can define a compiler pass to define any
+hook points at instruction level, e.g.:
+
+- `CUDA_PROBE` (entry)
+- `CUDA_RETPROBE` (exit)
+- `__memcapture` (ld/st)
+- `Cluster launch Control Scheduler` {Thread block scheduler POC}
+
+```c
+__device__ static bool
+should_try_steal(State& s,
+    int current_block) {
+        return true;  // Always try to steal
+}
+```
+
+</div>
+
+<div class="border rounded p-2">
+
+### GPU Maps (5)
+
+- `PERGPUTD_ARRAY`
+- `GPU_ARRAY`
+- `GPU_HASH`
+- `GPU_RINGBUF`
+- `GPU_KERNEL_SHARED`
+
+(Can use all userspace CPU maps with high cost)
+
+</div>
+
+<div class="border rounded p-2">
+
+### GPU Helpers (15+)
+
+- `ebpf_puts`
+- `get_globaltimer`
+- `get_block_idx`
+- `get_block_dim`
+- `get_thread_idx`
+- `exit`
+- `get_grid_dim`
+- `get_sm_id`
+- `get_warp_id`
+- `get_lane_id`
+- + standard userspace BPF helpers (high cost)
+
+</div>
+
+</div>
+
+---
+
+# Optimizations
+
+<div class="grid grid-cols-2 gap-6 text-sm">
+
+<div class="border-l-4 border-blue-500 pl-4">
+
+### Warp-level Execution
+
+**Problem**: Per-thread eBPF causes warp divergence & bandwidth waste
+
+**Solution**: Execute eBPF **once per warp** (32 threads), not per thread
+
+- Warp leader executes, broadcasts result / updates maps
+- Reduces overhead by **60-81%** vs naive injection
+- Avoids divergence and deadlock risks
+
+</div>
+
+<div class="border-l-4 border-green-500 pl-4">
+
+### Hierarchical Map Placement
+
+**Problem**: PCIe latency ~40μs vs GPU local ~100ns (**400-1000x difference**)
+
+**Solution**: Logically Verify once, place at runtime
+
+| Data Type | Placement |
+|-----------|-----------|
+| Hot state (frequent) | GPU local, batch sync |
+| Cold config | Host DRAM |
+| Bidirectional | Hierarchical shards |
+
+- Relaxed consistency: staleness affects optimality, not correctness
+
+</div>
+
+Improved 60-80% performance for probes and helpers.
+
+</div>
+
+---
+layout: center
+class: text-center
+---
+
+# Part 2: gpu_ext
 
 Extending Linux GPU Driver with eBPF
 
@@ -669,7 +1091,7 @@ The default is round-robin / FIFO, we can impl:
 | Memory Priority | HP more prefetch and eviction protection, LP less | **55-92%** time ↓ |
 
 **Key**: Default policy does not allow different process has different behavior: we can have priority.
--  Compute-bound → Scheduling; 
+-  Compute-bound → Scheduling;
 - Memory-bound → Memory policy
 
 </div>
@@ -681,329 +1103,6 @@ The default is round-robin / FIFO, we can impl:
 **All use cases**: No application modifications needed
 
 </div>
-
----
-layout: center
-class: text-center
----
-
-# Part 2: Device eBPF
-
-Running eBPF on GPU Device (bpftime)
-
----
-
-# GPU Execution Model Background
-
-<div class="grid grid-cols-2 gap-6">
-
-<div class="text-base">
-
-### What is SIMT?
-
-- **S**ingle **I**nstruction **M**ultiple **T**hreads
-- Same instruction executes on multiple threads in parallel
-- Threads organized into **Warp** (32 threads)
-- Same warp threads execute same instruction synchronously
-- Different branches → **serialization (Divergence)**
-
-### Thread Hierarchy
-
-Thread → Warp (32) → Block → Grid → SM
-
-</div>
-
-<div>
-
-| Feature | CPU | GPU |
-|---------|-----|-----|
-| Thread count | Tens | Tens of thousands |
-| Scheduling unit | Single thread | Warp (32 threads) |
-| Branch handling | Prediction | Serialization |
-| Preemption | Full | Limited |
-
-</div>
-
-</div>
-
----
-
-# GPU Memory Hierarchy
-
-<div class="grid grid-cols-2 gap-4">
-
-<div class="flex justify-center">
-
-<img src="/gpu memory.png" class="rounded shadow-lg" style="max-height: 220px;" />
-
-</div>
-
-<div class="text-sm">
-
-### Memory Levels
-
-| Level | Speed | Capacity | Scope |
-|-------|-------|----------|-------|
-| Registers | Fastest | KB | Per-thread |
-| Shared Mem | Fast | 48-164KB | Per-block |
-| L1 Cache | Fast | 128KB | Per-SM |
-| L2 Cache | Medium | MBs | Global |
-| DRAM/HBM | Slow | GBs | Global |
-
-</div>
-
-</div>
-
-<div class="mt-4 p-3 bg-gray-100 rounded text-sm">
-
-- **Coalesced access**: Consecutive accesses merged into single transaction
-- **Bank conflict**: Shared memory contention causes serialization
-- **Cache miss**: Determines actual memory latency (L2 miss → HBM access ~400 cycles)
-
-</div>
-
----
-
-# What Can GPU eBPF Do?
-
-<div class="grid grid-cols-2 gap-6">
-
-<div class="text-base">
-
-### Fine-grained Profiling
-
-- Instruction-level observability
-- Per-thread/warp/SM metrics
-- Memory access pattern detection
-
-### Runtime Adaptation
-
-- Respond to device state
-- Safe and Dynamic policy adjustment in GPU kernel
-
-### Help Host-side Policies
-
-- Provide device visibility/controlility to host
-- Cross-layer coordination
-
-</div>
-
-<div>
-
-### e.g. SM Load Imbalance Trace
-
-<img src="/sm thread sched.png" class="rounded shadow-lg" style="max-height: 240px;" />
-
-**127x** difference observed between SMs
-
-Traced by [bpftime/gpu/threadscheduling](https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu/threadscheduling)
-
-</div>
-
-</div>
-
----
-
-# bpftime GPU Support: Maps, Helpers, Attach Types
-
-<div class="grid grid-cols-3 gap-3 text-xs">
-
-<div class="border rounded p-2">
-
-### Attach Types (3)
-
-User can define a compiler pass to define any
-hook points at instruction level, e.g.:
-
-- `CUDA_PROBE` (entry)
-- `CUDA_RETPROBE` (exit)
-- `__memcapture` (ld/st)
-- `Cluster launch Control Scheduler` {Thread block scheduler POC}
-
-```c
-__device__ static bool 
-should_try_steal(State& s, 
-    int current_block) {
-        return true;  // Always try to steal
-}
-```
-
-</div>
-
-<div class="border rounded p-2">
-
-### GPU Maps (5)
-
-- `PERGPUTD_ARRAY`
-- `GPU_ARRAY`
-- `GPU_HASH`
-- `GPU_RINGBUF`
-- `GPU_KERNEL_SHARED`
-
-(Can use all userspace CPU maps with high cost)
-
-</div>
-
-<div class="border rounded p-2">
-
-### GPU Helpers (15+)
-
-- `ebpf_puts`
-- `get_globaltimer`
-- `get_block_idx`
-- `get_block_dim`
-- `get_thread_idx`
-- `exit`
-- `get_grid_dim`
-- `get_sm_id`
-- `get_warp_id`
-- `get_lane_id`
-- + standard userspace BPF helpers (high cost)
-
-</div>
-
-</div>
-
----
-
-# bpftime Architecture (With GPU)
-
-<div class="flex justify-center">
-
-<img src="/bpftime.png" class="rounded shadow-lg" style="max-height: 420px;" alt="Device eBPF Architecture" />
-
-</div>
-
----
-
-# Instrumentation: Fatbin Hook & PTX Injection
-
-<div class="flex justify-center">
-
-<img src="/fatbin.jpg" class="rounded shadow-lg" style="max-height: 420px;" alt="Fatbin Hook and PTX Injection" />
-
-</div>
-
----
-
-# PTX Injection: Patching & Wrapping
-
-<div class="flex justify-center">
-
-<img src="/injection.png" class="rounded shadow-lg" style="max-height: 420px;" alt="PTX Injection Details" />
-
-</div>
-
----
-
-# Example: launchlate - Kernel Launch Latency Profiler
-
-<div class="grid grid-cols-2 gap-4">
-
-<div class="text-xs">
-
-```c
-BPF_MAP_DEF(BPF_MAP_TYPE_ARRAY, launch_time);
-
-// CPU-side uprobe captures launch time
-SEC("uprobe/app:cudaLaunchKernel")
-int uprobe_launch(struct pt_regs *ctx) {
-    u64 ts_cpu = bpf_ktime_get_ns();
-    bpf_map_update_elem(&launch_time, &key, &ts_cpu, BPF_ANY);
-}
-
-// GPU-side kprobe captures execution start
-SEC("kprobe/_Z9vectorAddPKfS0_Pf")
-int kprobe_exec() {
-    u64 ts_gpu = bpf_get_globaltimer();
-    u64 *ts_cpu = bpf_map_lookup_elem(&launch_time, &key);
-    u64 latency = ts_gpu - *ts_cpu;
-    // Update histogram...
-}
-```
-
-</div>
-
-<div class="text-sm">
-
-### Problem
-
-CUPTI shows kernel "started" quickly, but it's slow. Why?
-
-**Hidden issue**: Thread blocks competing for SMs with other kernels (multi-process, multi-stream)
-
-- **CUPTI sees**: Kernel start/end time (looks fine)
-- **Reality**: Many blocks waiting for SM resources
-- **bpftime**: Per-thread block/warp scheduling timestamp inside kernel
-
-### How It Works
-
-1. **CPU uprobe**: Record T1 at `cudaLaunchKernel()`
-2. **GPU kprobe**: Record T2 **per-thread block** at kernel entry
-3. See **when each thread block gets scheduled**
-
-
-[bpftime/gpu/launchlate](https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu/launchlate)
-
-</div>
-
-</div>
-
----
-
-# Optimizations
-
-<div class="grid grid-cols-2 gap-6 text-sm">
-
-<div class="border-l-4 border-blue-500 pl-4">
-
-### Warp-level Execution
-
-**Problem**: Per-thread eBPF causes warp divergence & bandwidth waste
-
-**Solution**: Execute eBPF **once per warp** (32 threads), not per thread
-
-- Warp leader executes, broadcasts result / updates maps
-- Reduces overhead by **60-81%** vs naive injection
-- Avoids divergence and deadlock risks
-
-</div>
-
-<div class="border-l-4 border-green-500 pl-4">
-
-### Hierarchical Map Placement
-
-**Problem**: PCIe latency ~40μs vs GPU local ~100ns (**400-1000x difference**)
-
-**Solution**: Logically Verify once, place at runtime
-
-| Data Type | Placement |
-|-----------|-----------|
-| Hot state (frequent) | GPU local, batch sync |
-| Cold config | Host DRAM |
-| Bidirectional | Hierarchical shards |
-
-- Relaxed consistency: staleness affects optimality, not correctness
-
-</div>
-
-Improved 60-80% performance for probes and helpers.
-
-</div>
-
----
-
-# Performance: Observability Tools Overhead
-
-Tested on a P40 GPU with llama.cpp 1B inference.
-
-| Tool | LOC | bpftime | NVBit |
-|------|-----|---------|-------|
-| kernelretsnoop | 153 | **8%** | 85% |
-| threadhist | 89 | **3%** | 87% |
-| launchlate | 347 | **14%** | 93% |
-
-**Key**: Warp-uniform execution achieves **3-14%** overhead vs NVBit's **85-93%**
 
 ---
 
