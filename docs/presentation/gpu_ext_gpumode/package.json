@@ -1,5 +1,5 @@
 {
-  "name": "gpu-ext-lpc-presentation",
+  "name": "gpu-ext-gpumode-presentation",
   "type": "module",
   "private": true,
   "scripts": {

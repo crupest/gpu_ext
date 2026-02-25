@@ -29,6 +29,18 @@ docs/driver_docs/sched/GPreempt/
 # Large trace CSV files (can be 100s of MB)
 scripts/xcoord/results/*/trace_*.csv
 scripts/xcoord/results/
+workloads/llama.cpp/results/msched_trace/*.csv
+workloads/llama.cpp/results/msched_trace/*.txt
 
 # Large log files
 scripts/sched/llama_server_test/results/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Extension binaries (built from source)
+extension/eviction_cycle_moe
+
+# Presentation build output
+docs/presentation/*/dist/

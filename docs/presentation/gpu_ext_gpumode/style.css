@@ -5,9 +5,8 @@
   padding-bottom: 1rem;
 }
 
-/* 封面页背景 */
+/* 封面页背景 — 白色，和其他页一致 */
 .slidev-page-1 {
-  background-image: url('/LPC2025_slide_bg_a.jpg') !important;
-  background-size: cover !important;
-  background-position: center !important;
+  background-image: none !important;
+  background-color: white !important;
 }

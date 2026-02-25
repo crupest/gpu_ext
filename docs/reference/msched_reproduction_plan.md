@@ -93,54 +93,62 @@ gpu_ext 论文已经在单应用场景下证明了部分效果：
 
 ## 3. 复现路线：先离线后在线
 
-### 3.1 为什么先用 NVBit 离线复现？
+### 3.1 ~~为什么先用 NVBit 离线复现？~~ → NVBit 在 RTX 5090 上不可行
 
-1. **验证上界**: 先确认 MSched 算法在我们的 workload + 硬件上能获得多大收益
-2. **理解 pattern**: 离线 profiling 可以清楚看到每个 kernel 的 memory access pattern 分布（T1/T2/T3 占比）
-3. **作为对照**: 后续在线学习的精度可以和离线 ground truth 对比
-4. **NVBit 可用**: v1.7.7.1 已支持 RTX 5090 (SM_120)
+原计划用 NVBit 做 device 侧离线 profiling，但**实测失败**：
 
-### 3.2 整体路线
+1. ~~**NVBit 可用**: v1.7.7.1 已支持 RTX 5090 (SM_120)~~ → **实际不可行**: NVBit binary instrumentation 在 SM_120 上极慢（10+ 分钟仅初始化，CPU 200%，模型未加载），20B 和 120B 模型均超时
+2. **根本原因**: NVBit 需要对每条指令做 binary translation，RTX 5090 的新 SM 架构使这个过程极其缓慢
+3. **替代方案**: 使用**解析式方法**（从 GGUF 元数据计算 per-layer working set）+ **chunk_trace**（host 侧 UVM 事件追踪）替代
+
+> **重要**: 本文档中所有 working set 分析数据均来自**解析式计算**和 **host 侧 chunk_trace**，**不包含任何 NVBit device 侧追踪数据**。
+
+### 3.2 修正后的整体路线
 
 ```
-Phase 0: NVBit 离线 profiling（复现 MSched 的 template-based prediction）
-  ↓ 验证: per-kernel working set 预测能达到多少精度
-  ↓ 产出: kernel→pages 映射表、T1/T2/T3 分类
+Phase 0: ~~NVBit 离线 profiling~~ → 解析式 Working Set 分析 ✅ 已完成
+  ↓ 方法: GGUF 元数据解析 + host 侧 chunk_trace
+  ↓ 产出: T1/T2/T3 分类、per-decode-step 分析
+  ↓ 限制: 无 device 侧 per-kernel ground truth（NVBit 不可行）
 
-Phase 1: 用离线 profile 数据指导 gpu_ext 策略
-  ↓ 将 NVBit 产生的映射表加载到 BPF map
-  ↓ 新 prefetch policy: 根据映射表精确预取
-  ↓ 新 eviction policy: 根据 kernel sequence 做 Belady
-  ↓ 验证: 对比 gpu_ext 现有策略 vs 离线指导策略
+Phase 1: BPF eviction policy 实验 ✅ 已完成
+  ↓ 实现 cycle_moe eviction policy (T1 保护)
+  ↓ 结论: eviction 优化空间有限，默认 LRU 已足够好
+  ↓ 关键发现: Hash map/move_head 在 fault handler 中不安全
 
-Phase 2: 在线 working set 学习（gpu_ext 独有贡献）
-  ↓ device-side eBPF 在运行时观察 per-kernel access pattern
+Phase 2: Layer-aware prefetch（下一步重点）
+  ↓ 基于 fault VA 推断当前层号，预取下一层 weights
+  ↓ 不需要 NVBit — 利用 VA 地址单调递增的特性
+  ↓ 目标: 消除 51% re-fault (83 GB 浪费迁移)
+
+Phase 3: 在线 working set 学习（gpu_ext 独有贡献）
+  ↓ device-side eBPF (bpftime) 在运行时观察 per-kernel access pattern
   ↓ 学到映射后 host-side prefetch hook 使用
-  ↓ 验证: 在线学习精度 vs 离线 ground truth
-
-Phase 3: 集成与评估
-  ↓ 在所有 workload 上跑完整实验
-  ↓ 和 gpu_ext 现有策略对比
-  ↓ 和 MSched 论文数据对比
+  ↓ 前提: bpftime GPU 支持在 RTX 5090 上可用
 ```
 
 ---
 
-## 4. Phase 0: NVBit 离线 Profiling
+## 4. ~~Phase 0: NVBit 离线 Profiling~~ → 已放弃，改用解析式方法
 
-### 4.1 目标
+### 4.1 ~~目标~~ → 实际状态: NVBit 不可行
 
-- 在 RTX 5090 上用 NVBit instrument llama.cpp 120B 的 decode 过程
-- 记录每个 GPU kernel 的: kernel name/hash, launch args, 访问的 memory pages
-- 分析 T1/T2/T3 template 分布
-- 生成 `kernel_id → {page_ranges}` 映射表
+原计划:
+- ~~在 RTX 5090 上用 NVBit instrument llama.cpp 120B 的 decode 过程~~
+- ~~记录每个 GPU kernel 的: kernel name/hash, launch args, 访问的 memory pages~~
+- ~~分析 T1/T2/T3 template 分布~~
+- ~~生成 `kernel_id → {page_ranges}` 映射表~~
 
-### 4.2 NVBit 环境
+**实际结果**: NVBit binary instrumentation 在 RTX 5090 上完全不可用。20B 和 120B 模型均在初始化阶段超时（10+ 分钟，CPU 200%，GPU 仅 632 MiB）。ws_trace.so 工具已编写但无法产出数据。
 
-- **NVBit 版本**: v1.7.7.1（支持 SM_120）
-- **CUDA 要求**: >= 12.8（我们应该有 12.9+）
+**替代**: 使用解析式方法（GGUF 元数据 + chunk_trace host 侧事件），详见后文 "解析式 Working Set 分析" 章节。
+
+### 4.2 NVBit 环境（仅供参考，实际不可用）
+
+- **NVBit 版本**: v1.7.7.1（声称支持 SM_120）
+- **CUDA**: 12.9
 - **GPU**: RTX 5090, compute capability 12.0 (SM_120)
-- **注意**: NVBit 开销大（85%+），只用于离线 profiling，不用于运行时
+- **实测结果**: binary translation 阶段极慢，无法完成模型加载。原因可能是 SM_120 指令集新增内容过多，NVBit 的翻译器无法高效处理
 
 ### 4.3 实现步骤
 

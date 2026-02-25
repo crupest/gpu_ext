@@ -3,7 +3,7 @@ theme: academic
 title: 'Extending eBPF to GPU Device and Driver Contexts'
 info: |
   ## Extending eBPF to GPU Device and Driver Contexts
-  Linux Plumbers Conference 2025 - eBPF Track
+  GPU MODE Community Talk
 class: text-center
 drawings:
   persist: false
@@ -43,17 +43,18 @@ eunomia-bpf community
 <div>
 
 ### Background
+
 - GPU Stack Overview
 - Workload Diversity
 
 ### The Problem
 
+- Black Boxes: What's Happening Inside?
 - Static Policies vs Diverse Workloads
-- Device Black Boxes
 - Existing Solutions & Limitations
 
 ### Insight
-- GPU needs an extensible OS policy interface
+- GPU needs an observable, extensible OS policy interface
 
 </div>
 
@@ -242,34 +243,31 @@ eunomia-bpf community
 
 ---
 
-# The Problem: GPU Software Stack
+# The Problem: Invisible & Inflexible
 
 <div class="grid grid-cols-2 gap-6">
 
 <div>
 
-**User-space Runtime** (closed-source)
+### Invisible — Black Boxes
 
-**GPU Driver** (partially open-source)
-- One-Size-Fits-All policies
-- Memory: LRU eviction, tree-based prefetch
-- Scheduling: Round-robin, fixed timeslice
-
-> Very slow and blackbox policies make people want **kernel bypass** (e.g. UVM offer transparency, but they try to manage memory themselves) like **DPDK**
-
-**Vendor Firmware** (closed-source, black box)
-
-**Applications & Device Code**
-- Diverse workloads, diverse access patterns
+- **Runtime (CUDA)**: closed-source, internal state not exposed
+- **Driver **: why did it evict this page? What access pattern?
+- **Firmware**: completely closed-source
+- **Device execution**: no per-thread/warp metrics from host
+- Cannot correlate CPU launch → GPU execution
 
 </div>
 
 <div>
 
-**Where can we add extensibility?**
+### Inflexible — Static Policies
 
-- Userspace shim (LD_PRELOAD): change command before they get to driver
-- GPU Driver: **policy open-source** after 2022
+- **Driver UVM Memory**: LRU eviction, tree-based prefetch
+- **Driver Scheduling**: Round-robin, fixed timeslice
+- **Device Scheduling**: CLC (Hopper+) limited to block placement
+- No per-workload or per-tenant differentiation
+- Hard to change: LD_PRELOAD limited scope, kernel driver code hard to modify safely
 
 </div>
 
@@ -277,7 +275,7 @@ eunomia-bpf community
 
 ---
 
-# Existing Solutions For extensibility
+# Existing Solutions & Limitations
 
 <div class="grid grid-cols-2 gap-4">
 
@@ -303,9 +301,8 @@ eunomia-bpf community
 
 **Device Profilers** (NVBit, Neutrino, CUPTI)
 - Read-only: cannot modify behavior or inject logic
-- High overhead
-- No per-thread visibility (CUPTI), or no cross-layer (NVBit)
-- Cannot dynamically attach without restart
+- High overhead (NVBit 85-93%), NVBit needs LD_PRELOAD
+- No per-thread visibility (CUPTI), no cross-layer (NVBit)
 
 </div>
 
@@ -347,46 +344,32 @@ Safe, dynamic, verified programs that extend the Linux kernel — <b>without mod
 
 # Why eBPF?
 
-<div class="grid grid-cols-2 gap-6">
+<div class="grid grid-cols-2 gap-6 text-sm">
 
-<div class="border-2 border-blue-500 rounded-lg p-4">
+<div class="border-2 border-blue-500 rounded-lg p-3">
 
 ### Proven in Traditional Systems
 
-- **sched_ext**: custom CPU schedulers via eBPF
-  - Linux 6.12 mainline (2024), Meta & Google production
+- **Observability**: bpftrace, BCC — trace any kernel function
+- **sched_ext**: custom CPU schedulers (Linux 6.12, Meta & Google)
 - **XDP**: programmable packet processing
-- **LSM hooks**: dynamic security policies
-- Hot-loadable: change policy **without rebooting**
-- **Safety**: policy advises, kernel decides
 
-| Subsystem | eBPF Extension |
-|-----------|---------------|
-| CPU scheduling | **sched_ext** |
-| Network | XDP, TC |
-| Security | LSM hooks |
-| **GPU driver** | **gpu_ext (ours)** |
 
 </div>
 
-<div class="border-2 border-green-500 rounded-lg p-4">
+<div class="border-2 border-green-500 rounded-lg p-3">
 
 ### Same Problem in GPU
 
-GPU driver has **hardcoded** policies:
-- Memory eviction: always **LRU**
-- Prefetching: always **tree-based**
-- Scheduling: always **round-robin**
-- No per-workload / per-tenant differentiation
+**Invisible**: profilers are read-only, high overhead, coarse-grained
 
-**Same problem as CPU scheduling before sched_ext**
+**Inflexible**: hardcoded eviction, prefetch, scheduling — no per-tenant differentiation
 
-### eBPF Makes Them Programmable
+→ Same problem as CPU before sched_ext
 
-- **Driver-side** (gpu_ext): hooks in GPU driver
-  - Custom eviction, prefetch, scheduling
-- **Device-side** (bpftime): eBPF ON the GPU
-  - Fine-grained profiling (3-14% overhead vs NVBit 85-93%)
+**eBPF Makes GPU Visible + Flexible**
+- **gpu_ext**: driver policy hooks + access pattern tracing
+- **bpftime**: per-thread profiling on GPU (3-14% overhead)
 - **No app modifications** needed
 
 </div>
@@ -454,34 +437,35 @@ Think of it like **CUPTI callbacks**, but:
 
 ---
 
-# Insight: GPU Needs an Extensible OS Policy Interface
+# Insight: GPU Needs an Observable, Extensible OS Interface
 
 <div class="grid grid-cols-2 gap-6">
 
-<div class="border-2 border-blue-500 rounded-lg p-4">
+<div class="border-2 border-orange-500 rounded-lg p-4">
 
-### GPU Driver is the Right Place
+### Observable — Why?
 
-- **Global visibility and control**: coordinate all applications Cross-tenants
-- **Privileged access**: controls hardware mechanisms (Replayable Pagefaults, TSG)
-- **Transparent**: no app modifications needed
+- Device execution state invisible from host
+  - Warp divergence, SM load, memory access patterns
+- Existing profilers: read-only, high overhead, coarse-grained
+- Need **fine-grained, low-overhead, cross-layer** observability
 
-Inspired by **sched_ext/cache_ext**: CPU-side has proven this pattern works
+<div class="mt-3 p-2 bg-orange-50 rounded text-base">
+→ Requires instrumentation <b>on GPU device</b>
+</div>
 
 </div>
 
-<div class="border-2 border-orange-500 rounded-lg p-4">
+<div class="border-2 border-blue-500 rounded-lg p-4">
 
-### But Host eBPF is Not Enough
+### Extensible — Why?
 
-- Device side logic is complex
-- Device internal execution state invisible
-  - Warp divergence, SM load
-- Memory sync patterns invisible
-- Cannot execute policy logic **inside GPU kernels**
+- Driver has **global cross-tenant visibility** and hardware control
+- But policies are hardcoded, hard to change safely
+- Need **safe, dynamic, per-workload** policy customization
 
-<div class="mt-3 p-2 bg-orange-50 rounded text-base">
-Need to extend eBPF to GPU device contexts
+<div class="mt-3 p-2 bg-blue-50 rounded text-base">
+→ Programmable hooks <b>in GPU driver</b> (like sched_ext)
 </div>
 
 </div>
@@ -513,9 +497,9 @@ Need to extend eBPF to GPU device contexts
 
 **Extending Linux GPU Driver with eBPF**
 
-- Add eBPF attach points to GPU driver
-- Memory management hooks in UVM
-- Scheduling interface hooks with TSG
+- Driver-level tracing: access patterns, fault behavior, scheduling events
+- Programmable memory policy: eviction, prefetch hooks in UVM
+- Programmable scheduling: TSG lifecycle hooks
 - Uses standard eBPF verifier + struct_ops
 
 </div>
@@ -533,7 +517,7 @@ Running eBPF on GPU Device (bpftime)
 
 ---
 
-# GPU Execution Model Background
+# GPU Execution Model: Why eBPF on GPU is Hard
 
 <div class="grid grid-cols-2 gap-6">
 
@@ -560,7 +544,7 @@ Thread → Warp (32) → Block → Grid → SM
 | Thread count | Tens | Tens of thousands |
 | Scheduling unit | Single thread | Warp (32 threads) |
 | Branch handling | Prediction | Serialization |
-| Memory model | Coherent | Hierarchical (Reg→Shared→L1→L2→HBM) |
+| Preemption | Full | Limited |
 
 **Challenge**: eBPF assumes scalar execution — GPU is SIMT
 
@@ -759,9 +743,9 @@ Tested on a P40 GPU with llama.cpp 1B inference.
 | Runtime overhead | Low | Low | 85-93% | **3-14%** |
 | Per-thread metrics | ✗ | ✗ | ✓ | **✓** |
 | Cross CPU+GPU | Partial | ✓ | ✗ | **✓** |
-| Dynamic attach | ✗ | ✗ | ✓ | **✓** |
+| Attach to running process | ✗ | ✗ | ✗ | **✓** |
 | Custom logic | ✗ | ✗ | ✓ | **✓** |
-| No recompile needed | ✗ | ✓ | ✓ | **✓** |
+| No recompile needed | ✓ | ✓ | ✓ | **✓** |
 | Can modify behavior | ✗ | ✗ | ✗ | **✓** |
 
 </div>
@@ -774,7 +758,7 @@ Tested on a P40 GPU with llama.cpp 1B inference.
 
 ---
 
-# bpftime Architecture (With GPU)
+# bpftime Architecture
 
 <div class="flex justify-center">
 
@@ -866,7 +850,7 @@ should_try_steal(State& s,
 
 ---
 
-# Optimizations
+# Optimizations: Warp-level Execution & Map Placement
 
 <div class="grid grid-cols-2 gap-6 text-sm">
 
