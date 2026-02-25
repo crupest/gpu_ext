@@ -1,9 +1,0 @@
-Connected to gpu_ext shared map at /sys/fs/bpf/xcoord_gpu_state
-Successfully connected gpu_state_map to gpu_ext
-xCoord GPU-aware scheduler loaded!
-  Fault rate boost threshold: 1000 faults/sec
-  GPU state map: connected
-
-Press Ctrl-C to exit (will fallback to CFS)...
-
-local=2 global=0 gpu_boosted=0 gpu_throttled=0

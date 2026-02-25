@@ -1,36 +1,0 @@
-INFO 02-23 17:14:48 [__init__.py:216] Automatically detected platform cuda.
-Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7071dfac92d0>, seed=0, num_prompts=20, dataset_name='sharegpt', no_stream=False, dataset_path='/home/yunwei37/workspace/gpu/gpu_ext/workloads/llama.cpp/datasets/sharegpt_vicuna.json', no_oversample=False, custom_output_len=256, custom_skip_chat_template=False, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 0}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='openai', endpoint_type=None, base_url='http://127.0.0.1:8013', host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=1, model='gpt-oss-120b-mxfp4', tokenizer='Qwen/Qwen3-30B-A3B-FP8', use_beam_search=False, logprobs=None, request_rate=0.2, burstiness=1.0, trust_remote_code=False, disable_tqdm=False, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics='ttft,tpot,itl', metric_percentiles='99', goodput=None, request_id_prefix='benchmark-serving', top_p=None, top_k=None, min_p=None, temperature=None, tokenizer_mode='auto', served_model_name=None, lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=600)
-Starting initial single prompt test run...
-Waiting for endpoint to become up in 600 seconds
- |          | 00:00 elapsed, ? remaining |          | 00:00 elapsed, 00:00 remaining |          | 00:09 elapsed, 247:44:16 remaining
-Initial test run completed. Starting main benchmark run...
-Traffic request rate: 0.2
-Burstiness factor: 1.0 (Poisson process)
-Maximum request concurrency: 1
-  0%|          | 0/20 [00:00<?, ?it/s]  5%|▌         | 1/20 [00:12<03:50, 12.15s/it] 10%|█         | 2/20 [01:12<12:04, 40.23s/it] 15%|█▌        | 3/20 [01:33<08:56, 31.56s/it] 20%|██        | 4/20 [01:41<05:57, 22.35s/it] 25%|██▌       | 5/20 [01:51<04:29, 17.98s/it] 30%|███       | 6/20 [02:44<06:58, 29.90s/it] 35%|███▌      | 7/20 [02:52<04:55, 22.77s/it] 40%|████      | 8/20 [02:58<03:27, 17.30s/it] 45%|████▌     | 9/20 [03:07<02:40, 14.61s/it] 50%|█████     | 10/20 [03:35<03:09, 18.90s/it] 55%|█████▌    | 11/20 [03:45<02:25, 16.14s/it] 60%|██████    | 12/20 [04:25<03:06, 23.31s/it] 65%|██████▌   | 13/20 [04:29<02:03, 17.60s/it] 70%|███████   | 14/20 [04:57<02:04, 20.73s/it] 75%|███████▌  | 15/20 [05:05<01:24, 16.95s/it] 80%|████████  | 16/20 [05:26<01:12, 18.03s/it] 85%|████████▌ | 17/20 [05:40<00:50, 16.90s/it] 90%|█████████ | 18/20 [05:58<00:34, 17.24s/it] 95%|█████████▌| 19/20 [06:08<00:14, 14.86s/it]100%|██████████| 20/20 [06:22<00:00, 14.85s/it]100%|██████████| 20/20 [06:22<00:00, 19.14s/it]
-tip: install termplotlib and gnuplot to plot the metrics
-============ Serving Benchmark Result ============
-Successful requests:                     20        
-Maximum request concurrency:             1         
-Request rate configured (RPS):           0.20      
-Benchmark duration (s):                  382.84    
-Total input tokens:                      4270      
-Total generated tokens:                  5153      
-Request throughput (req/s):              0.05      
-Output token throughput (tok/s):         13.46     
-Peak output token throughput (tok/s):    155.00    
-Peak concurrent requests:                2.00      
-Total Token throughput (tok/s):          24.61     
----------------Time to First Token----------------
-Mean TTFT (ms):                          3101.02   
-Median TTFT (ms):                        2282.39   
-P99 TTFT (ms):                           7306.75   
------Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          71.29     
-Median TPOT (ms):                        71.52     
-P99 TPOT (ms):                           129.47    
----------------Inter-token Latency----------------
-Mean ITL (ms):                           63.44     
-Median ITL (ms):                         56.58     
-P99 ITL (ms):                            192.57    
-==================================================

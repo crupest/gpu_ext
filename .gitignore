@@ -1,6 +1,7 @@
 .direnv
 /build
 src/.output/
+node_modules/
 
 # BPF binary programs
 src/struct_ops
@@ -24,3 +25,10 @@ extension/prefetch_stride
 
 # External repositories
 docs/driver_docs/sched/GPreempt/
+
+# Large trace CSV files (can be 100s of MB)
+scripts/xcoord/results/*/trace_*.csv
+scripts/xcoord/results/
+
+# Large log files
+scripts/sched/llama_server_test/results/
