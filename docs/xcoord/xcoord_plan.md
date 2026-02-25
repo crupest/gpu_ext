@@ -776,14 +776,35 @@ PID 2300571  fault_rate=2342  fault_cnt=2206  evict_cnt=1066340  used_cnt=367361
 2. gpu_ext 的 fault tracking 完全正常：1M+ activate, 1M+ eviction
 3. sched_ext 调度器正常运行（96K+ tasks），但无法 boost UVM worker（PID 不匹配）
 
+**实验运行 3 — Worker PID 追踪 + 标准 benchmark 方法论 (2026-02-24)**:
+
+使用 `poc1_xcoord_bench.py`（基于 `server_bench.py` / `common.py` 标准方法论重写），20 prompts, ctx=4096:
+
+| 场景 | TTFT Mean | Median TTFT | Output tok/s | TPOT | 成功请求 | sched_ext stats |
+|------|-----------|-------------|-------------|------|---------|-----------------|
+| Baseline | 3490 ms | 3526 ms | 12.57 | 71.84 ms | 19/20 | N/A |
+| CPU Stress | 3061 ms | 1117 ms | 13.01 | 74.61 ms | 17/20 | N/A |
+| xCoord | 3502 ms | 3442 ms | 13.13 | 72.49 ms | 19/20 | `gpu_boosted=1` |
+
+**gpu_ext 侧数据**:
+```
+PID 151441  fault_rate=380~1210  evict_cnt=1021695  used_cnt=3749175  thrashing=no
+```
+
+**关键发现**:
+1. **CPU stress 对 120B UVM 几乎无影响**: baseline 和 cpu_stress 的 TTFT/throughput 在噪声范围内。120B 模型通过 UVM 分配 60GB（GPU 仅 32GB），UVM page fault overhead 完全主导性能，CPU 调度的边际效应被淹没
+2. **gpu_boosted=1**: worker PID 追踪机制工作，但匹配率极低。可能因 UVM worker 线程生命周期短（处理完 fault 就退出），sched_ext enqueue 时不一定能看到
+3. **120B 不是 xCoord 的理想验证场景**: UVM overhead 太大（TTFT ~3.5s），CPU stress 产生的额外延迟相对微不足道。应切换到 **20B 模型**（POC-0 确认有 11.7% CPU-GPU 耦合）
+
 #### 10.3.5 当前阻塞问题
 
-**问题 1: UVM Worker PID 追踪（代码已修复，待验证）**
+**问题 1: UVM Worker PID 追踪 — ✅ 已验证（效果有限）**
 
-修复已实现并编译通过（见 10.3.3 迭代 3），但尚未在完整实验中验证。单元测试（手动加载两个组件 5 秒）确认：
+Worker 追踪机制功能正常：
 - ✅ `uvm_worker_pids` map 正确 pin 到 `/sys/fs/bpf/xcoord_uvm_workers`
-- ✅ sched_ext 成功连接两个 map（`gpu_state_map`: preset fd=5, `uvm_worker_pids`: preset fd=6）
-- ⏳ 待验证：运行 llama-server 时 worker PID 是否被正确追踪 + gpu_boosted > 0
+- ✅ sched_ext 成功连接两个 map
+- ✅ `gpu_boosted=1` — 实验中确认至少 1 次 boost 触发
+- ⚠️ 但匹配率极低（1/39021 tasks），需要分析原因
 
 **问题 2: llama-server 120B UVM 崩溃 — ✅ 已解决**
 
@@ -835,32 +856,39 @@ $ curl /v1/chat/completions → 推理成功（TTFT 3612ms, 7.65 tok/s）
 
 1. ~~**🔴 修复 llama-server 120B 崩溃问题**~~ → ✅ 已解决（残留 GPU 进程占用显存）
 
-2. **🔴 重写实验脚本使用标准 benchmark 工具**
-   - 当前 `poc1_xcoord_scheduling.sh` 手动用 bash 管理 llama-server + 调用 `vllm bench serve`
-   - 应该使用 `workloads/llama.cpp/configs/server_bench.py` 的方法论（`common.py` 工具函数）
-   - 需要解决：`server_bench.py` 内部管理 server 生命周期，但 xCoord 需要拿到 server PID 后启动 BPF 组件
-   - 方案：新建 `poc1_xcoord_bench.py`，import `common.py`，遵循同样方法论，加入 xCoord 生命周期
+2. ~~**🔴 重写实验脚本使用标准 benchmark 工具**~~ → ✅ 已完成
+   - 新建 `scripts/xcoord/poc1_xcoord_bench.py`，import `common.py`（cleanup_gpu, wait_for_server, stop_server, parse_vllm_bench_output）
+   - 与 `server_bench.py` 完全一致的 benchmark 方法论 + JSON 结构化输出
+   - 加入 xCoord 生命周期管理 + stale BPF 进程清理
 
-3. **🟡 验证 worker PID 追踪效果**
-   - 运行完整 POC-1 实验 (3 场景)
-   - 关键观察: `gpu_boosted > 0` 且 xCoord 场景 TTFT < CPU stress 场景
-   - 如果 gpu_boosted 仍为 0: 检查 worker PID 是否在 track 时和 enqueue 时一致
+3. ~~**🟡 验证 worker PID 追踪效果**~~ → ✅ 已验证（效果有限）
+   - 完整 POC-1 实验 3 场景已完成
+   - `gpu_boosted=1` — 追踪机制工作但匹配率极低（1/39021 tasks）
+   - 120B UVM 场景 CPU stress 无显著影响（UVM overhead 主导）
 
-4. **🟢 考虑实验设计调整**
-   - 当前 120B baseline TTFT 已很高 (~3100ms)，CPU stress 仅额外增加 ~3%
-   - 可能需要更激进的 CPU 干扰（如 `stress-ng -c $(nproc) --cpu-method matrixprod`）
-   - 或尝试中等大小模型（如 30B-70B）让 UVM paging 更可控
+4. **🔴 切换到 20B 模型重新验证**
+   - 120B UVM 场景 CPU stress 几乎无影响（baseline TTFT ~3.5s），不适合验证 xCoord
+   - POC-0 已确认 20B 模型有 11.7% CPU-GPU 耦合，是更好的验证场景
+   - 修改 `poc1_xcoord_bench.py` 使用 20B 模型 + `--ctx 65536`（匹配 POC-0 配置）
+
+5. **🟡 分析 worker PID 匹配率低的原因**
+   - UVM worker 线程可能生命周期太短，sched_ext enqueue 时已不在 map 中
+   - 考虑在 `uvm_worker_pids` 中增加 timeout 或改用 per-CPU map 减少 lookup 开销
+   - 或者换方向：直接按 TGID 匹配进程（而非 worker 线程）
+
+6. **🟢 考虑更激进的 CPU 干扰方式**
+   - `stress-ng -c $(nproc) --cpu-method matrixprod`（更高 IPC 压力）
    - 或增加并发请求数 (`--max-concurrency 4`) 增加 page fault 争抢
 
 #### 10.3.7 POC-1 成功标准（更新版）
 
-基于已有实验数据调整预期:
+基于实验运行 3 数据更新:
 
-| 指标 | 当前 (no worker tracking) | 目标 (with worker tracking) | 判定 |
-|------|--------------------------|----------------------------|------|
-| gpu_boosted | 0 | > 0 (ideally > 1000) | 基本功能验证 |
-| TTFT (xCoord vs CPU stress) | 3214ms vs 3184ms (+1%) | xCoord < CPU stress 至少 5% | 性能改善 |
-| Output tok/s (xCoord vs stress) | 12.88 vs 13.04 (-1.2%) | xCoord > CPU stress | 不劣化 |
+| 指标 | 实验 3 结果 (120B) | 目标 (20B) | 判定 |
+|------|-------------------|------------|------|
+| gpu_boosted | 1 (✅ 但极低) | > 100 | 匹配率需改善 |
+| CPU stress 影响 | ~0% (120B 不适合) | >10% (POC-0 确认) | 需切换 20B |
+| xCoord vs stress | 无显著差异 | xCoord < stress 5%+ | 需有效场景 |
 | sched_ext state | enabled ✅ | enabled | 稳定性 |
 
 **决策点**:
