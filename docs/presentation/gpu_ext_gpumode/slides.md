@@ -647,33 +647,16 @@ int cuda__retprobe() {
 
 ---
 
-# Performance: Observability Tools Overhead
-
-Tested on a P40 GPU with llama.cpp 1B inference.
-
-| Tool | LOC | bpftime | NVBit |
-|------|-----|---------|-------|
-| kernelretsnoop | 153 | **8%** | 85% |
-| threadhist | 89 | **3%** | 87% |
-| launchlate | 347 | **14%** | 93% |
-
-**Key**: Warp-uniform execution achieves **3-14%** overhead vs NVBit's **85-93%**
-
----
-
 # bpftime vs Existing GPU Profilers
 
 <div class="text-sm">
 
 | Capability | CUPTI | Nsight Compute | NVBit | **bpftime** |
 |------------|-------|----------------|-------|-------------|
+| Online / Offline | Online | Offline (replay) | Online | **Online** |
 | Runtime overhead | Low | Low | 85-93% | **3-14%** |
-| Per-thread metrics | ✗ | ✗ | ✓ | **✓** |
+| Per-thread trace | ✗ | ✗ | ✓ | **✓** |
 | Cross CPU+GPU | Partial | ✓ | ✗ | **✓** |
-| Attach to running process | ✗ | ✗ | ✗ | **✓** |
-| Custom logic | ✗ | ✗ | ✓ | **✓** |
-| No recompile needed | ✓ | ✓ | ✓ | **✓** |
-| Can modify behavior | ✗ | ✗ | ✗ | **✓** |
 
 </div>
 
@@ -849,6 +832,20 @@ should_try_steal(State& s,
 Reduces overhead by 60-80% for probes and helpers.
 
 </div>
+
+---
+
+# Performance: Device eBPF Overhead
+
+Tested on a P40 GPU with llama.cpp 1B inference.
+
+| Tool | LOC | bpftime | NVBit |
+|------|-----|---------|-------|
+| kernelretsnoop | 153 | **8%** | 85% |
+| threadhist | 89 | **3%** | 87% |
+| launchlate | 347 | **14%** | 93% |
+
+**Key**: Warp-uniform execution achieves **3-14%** overhead vs NVBit's **85-93%**
 
 ---
 layout: center
