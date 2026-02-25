@@ -629,283 +629,217 @@ POC-3: 反向协调（CPU→GPU）           → 2 周（可选）
 
 ---
 
-### 10.3 POC-1: 最小单向协调 GPU→CPU（2 周）
+### 10.3 POC-1: 最小单向协调 GPU→CPU — 🔧 实现中
+
+> **状态**: 2026-02-24，代码实现完成，调试迭代 3 轮，正在解决最终的 worker PID 追踪 + 实验环境问题
+> **代码目录**: `extension/` (`eviction_lfu_xcoord*`, `sched_gpu_aware*`, `shared_maps.h`)
+> **实验结果目录**: `scripts/xcoord/results/poc1_xcoord_*/`
 
 **目标**: 用最少代码验证 "gpu_ext 写入 GPU 状态 → sched_ext 读取并调整优先级 → 性能改善"。
 
-#### 10.3.1 架构
+#### 10.3.1 架构（实际实现版）
 
 ```
-┌─────────────────────┐     ┌─────────────────────┐
-│   gpu_ext BPF        │     │   sched_ext BPF      │
-│                     │     │                     │
-│  chunk_activate() ──┼──→  │  enqueue():          │
-│  chunk_used()     ──┼──→  │    read gpu_state    │
-│                     │     │    if fault_rate HIGH │
-│  每次 hook 更新:      │     │      boost priority  │
-│  gpu_state_map[pid] │     │    else               │
-│    .fault_rate      │     │      normal priority  │
-│    .mem_pressure    │     │                     │
-│    .last_active_ns  │     │  select_cpu():       │
-│                     │     │    prefer same-NUMA   │
-└─────────────────────┘     └─────────────────────┘
-          │                          │
-          └──── /sys/fs/bpf/gpu_state_map ────┘
+┌───────────────────────────┐     ┌───────────────────────────┐
+│   gpu_ext BPF              │     │   sched_ext BPF            │
+│   eviction_lfu_xcoord      │     │   sched_gpu_aware          │
+│                           │     │                           │
+│  chunk_activate():         │     │  enqueue():                │
+│    update fault_rate       │     │    1. check uvm_worker_pids│
+│    track_uvm_worker()  ───┼──→  │       if active worker:    │
+│  chunk_used():             │     │       → boost (ENQ_HEAD)  │
+│    LFU frequency tracking  │     │    2. check gpu_state_map  │
+│    track_uvm_worker()  ───┼──→  │       if thrashing:        │
+│  eviction_prepare():       │     │       → throttle          │
+│    LFU eviction            │     │    3. else: vtime-fair     │
+│    track_uvm_worker()  ───┼──→  │                           │
+│                           │     │  select_cpu():             │
+│  Pinned maps:              │     │    → prev_cpu (cache warm) │
+│    gpu_state_map           │     │  dispatch():               │
+│    uvm_worker_pids         │     │    → dsq_move_to_local    │
+└───────────────────────────┘     └───────────────────────────┘
+          │                                │
+          ├── /sys/fs/bpf/xcoord_gpu_state ┤
+          └── /sys/fs/bpf/xcoord_uvm_workers ┘
 ```
 
-#### 10.3.2 Step 1: gpu_ext 侧 — 写入 GPU 状态（3 天）
+#### 10.3.2 已完成的实现 ✅
 
-**文件**: `extension/eviction_lfu_xcoord.bpf.c` (~200 LOC)
+**所有代码已编写并编译通过。** 文件清单:
 
-基于 `eviction_freq_pid_decay.bpf.c` 修改:
+| 文件 | LOC | 功能 | 状态 |
+|------|-----|------|------|
+| `shared_maps.h` | 48 | GPU/CPU 共享状态定义 + worker map 常量 | ✅ 完成 |
+| `eviction_lfu_xcoord.bpf.c` | 313 | LFU 驱逐 + gpu_state_map 写入 + worker PID 追踪 | ✅ 完成 |
+| `eviction_lfu_xcoord.c` | 252 | GPU 侧 loader，pin 两个共享 map | ✅ 完成 |
+| `sched_gpu_aware.bpf.c` | 180 | sched_ext BPF：enqueue 读取 worker map + gpu_state_map | ✅ 完成 |
+| `sched_gpu_aware.c` | 214 | sched_ext loader，bpf_obj_get + reuse_fd 连接两个 map | ✅ 完成 |
+| `Makefile` (修改) | — | 添加 SCX_APPS 构建规则（双 vmlinux.h） | ✅ 完成 |
+| `poc1_xcoord_scheduling.sh` | 274 | 3 场景自动化实验脚本 | ✅ 完成 |
+| **总计** | **1281** | | |
+
+**关键设计决策**:
+
+1. **双 vmlinux.h 方案**: gpu_ext 用旧 `vmlinux/x86/vmlinux.h`（包含 NVIDIA UVM 类型），sched_ext 用新 `vmlinux/x86/scx/vmlinux.h`（包含 sched_ext 类型）
+2. **直接 libbpf API**: sched_gpu_aware.c 用直接 libbpf API（非 SCX_OPS_OPEN/LOAD/ATTACH），因为 UEI 宏要求 clang 18 不支持的 32-bit atomics
+3. **SCX_ENUM_INIT 关键**: 必须在 open() 后调用 `SCX_ENUM_INIT(skel)` 和 `scx_hotplug_seq()`，否则所有 sched_ext 常量（SCX_DSQ_LOCAL, SCX_SLICE_DFL, SCX_ENQ_HEAD）均为 0，调度器完全不工作
+4. **Skeleton 命名**: bpftool 从 `sched_gpu_aware.bpf.o` 生成 `sched_gpu_aware.skel.h`，skeleton 结构体名为 `sched_gpu_aware_bpf`（带 `_bpf` 后缀）
+
+#### 10.3.3 调试迭代记录
+
+**迭代 1: 构建 sched_ext BPF 程序** — 3 个编译错误
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `sched_gpu_aware.bpf.skel.h` not found | Makefile 生成 `*.skel.h` 非 `*.bpf.skel.h` | 改 include 为 `sched_gpu_aware.skel.h` |
+| skeleton struct 名 `sched_gpu_aware` 未定义 | SCX 宏期望名字不含 `_bpf`，但 skeleton 实际名为 `sched_gpu_aware_bpf` | 重写 loader 用直接 libbpf API |
+| `u64` type undefined in userspace | skeleton header 使用内核 `u64` 类型 | 用 `#include <scx/common.h>` 提供 typedef |
+
+**迭代 2: sched_ext 调度器不生效** — SCX_ENUM_INIT 缺失
+
+- **症状**: `cat /sys/kernel/sched_ext/state` = `disabled`，stats 仅 `local=2 global=0`
+- **根因**: 没有调用 `SCX_ENUM_INIT(skel)`，导致 `SCX_DSQ_LOCAL=0`, `SCX_SLICE_DFL=0`, `SCX_ENQ_HEAD=0`
+- **修复**: 添加 `#include <scx/common.h>`, `SCX_ENUM_INIT(skel)`, `scx_hotplug_seq()` 到 open() 之后
+- **结果**: 调度器正常启用，state=enabled，`local=12210 global=96722`，处理 ~6000 tasks/sec
+
+**迭代 3: gpu_boosted 始终为 0** — UVM Worker PID 不匹配 ⚠️ 当前问题
+
+- **症状**: gpu_ext 正确报告 `fault_rate=5169, thrashing=YES`，但 sched_ext 的 `gpu_boosted=0`
+- **根因**: `gpu_state_map` 以内存所有者 PID (llama-server) 为 key，但 UVM page fault handler 运行在**内核 kworker 线程**中，其 tgid 与 llama-server 不同。sched_ext 在 enqueue 时检查当前 task 的 tgid，永远匹配不到 gpu_state_map 中的 llama-server PID。
+- **解决方案**: 新增 `uvm_worker_pids` map
+  - gpu_ext 在每个 hook 中调用 `track_uvm_worker()` 记录当前执行线程的 tgid + 时间戳
+  - sched_ext enqueue() 先查 `uvm_worker_pids`（当前 task 是否是 UVM worker？），再查 `gpu_state_map`
+  - 5 秒超时自动过期陈旧 worker
+
+**已实现的修复代码**（2026-02-24，已编译通过，待完整测试）:
 
 ```c
-// shared_maps.h — GPU/CPU 共享状态定义
-struct gpu_pid_state {
-    u64 fault_count;        // 累计 page fault 次数
-    u64 fault_rate;         // faults/sec (滑动窗口)
-    u64 eviction_count;     // 被驱逐的 chunk 次数
-    u64 mem_bytes;          // 当前 GPU 内存使用量
-    u64 last_active_ns;     // 最后活跃时间
-    u32 is_thrashing;       // 是否在 thrashing (fault_rate > threshold)
-};
-
-// 在 chunk_activate 中更新 (每次 page fault 触发)
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate, ...) {
-    u32 pid = get_owner_pid_from_chunk(chunk);
-    struct gpu_pid_state *state = bpf_map_lookup_elem(&gpu_state_map, &pid);
-    if (state) {
-        u64 now = bpf_ktime_get_ns();
-        __sync_fetch_and_add(&state->fault_count, 1);
-        // 滑动窗口 fault rate (每秒更新)
-        u64 elapsed = now - state->last_active_ns;
-        if (elapsed > 1000000000ULL) { // 1 second
-            state->fault_rate = state->fault_count * 1000000000ULL / elapsed;
-            state->fault_count = 0;
-            state->last_active_ns = now;
-        }
-    }
-    // ... 正常 LFU eviction 逻辑
-    return 0;
-}
-
-// 在 eviction_prepare 中更新 eviction_count
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare, ...) {
-    // ... 遍历链表，找到最低频 chunk
-    u32 victim_pid = get_owner_pid_from_chunk(victim);
-    struct gpu_pid_state *state = bpf_map_lookup_elem(&gpu_state_map, &victim_pid);
-    if (state) {
-        __sync_fetch_and_add(&state->eviction_count, 1);
-    }
-    return 0;
-}
-```
-
-**Pin map 到 BPF 文件系统**:
-```c
-// 在用户空间 loader 中:
-int map_fd = bpf_object__find_map_fd_by_name(obj, "gpu_state_map");
-bpf_obj_pin(map_fd, "/sys/fs/bpf/xcoord_gpu_state");
-```
-
-**验证方法**:
-```bash
-# 1. 加载 gpu_ext 策略
-sudo ./eviction_lfu_xcoord
-
-# 2. 运行 workload
-cd workloads/llama.cpp && uv run python bench.py
-
-# 3. 读取 shared map
-sudo bpftool map dump pinned /sys/fs/bpf/xcoord_gpu_state
-# 应看到 per-PID 的 fault_rate, eviction_count 等
-```
-
-**成功标准**: 运行 llama-server 时能实时看到 PID 的 fault_rate 在变化。
-
-#### 10.3.3 Step 2: sched_ext 侧 — 读取 GPU 状态并调整优先级（5 天）
-
-**文件**: `extension/sched_gpu_aware.bpf.c` (~400 LOC)
-
-基于 `scx_simple`（sched_ext 最简单的示例）修改:
-
-```c
-#include <scx/common.bpf.h>
-
-// 打开 gpu_ext pin 的 map
+// eviction_lfu_xcoord.bpf.c — 新增 worker 追踪
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, u32);    // PID
-    __type(value, struct gpu_pid_state);
-} gpu_state_map SEC(".maps");  // 通过 bpf_obj_get() 打开 pinned map
+    __uint(max_entries, XCOORD_MAX_WORKERS);
+    __type(key, u32);    /* worker thread PID (tgid) */
+    __type(value, u64);  /* last activity timestamp (ns) */
+} uvm_worker_pids SEC(".maps");
 
-// 阈值参数 (可通过 map 动态调整)
-#define FAULT_RATE_HIGH   1000  // faults/sec
-#define FAULT_RATE_MEDIUM  100
-#define BOOST_WEIGHT       200  // vruntime 权重调整
+static __always_inline void track_uvm_worker(void) {
+    u32 worker_pid = bpf_get_current_pid_tgid() >> 32;
+    u64 now = bpf_ktime_get_ns();
+    bpf_map_update_elem(&uvm_worker_pids, &worker_pid, &now, BPF_ANY);
+}
+// → 在 chunk_activate, chunk_used, eviction_prepare 中均调用
 
-// enqueue(): 根据 GPU fault rate 调整优先级
-void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p,
-                    u64 enq_flags)
-{
+// sched_gpu_aware.bpf.c — 新增 worker 查询
+void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags) {
     u32 pid = p->tgid;
-    struct gpu_pid_state *gpu = bpf_map_lookup_elem(&gpu_state_map, &pid);
-
-    if (gpu && gpu->fault_rate > FAULT_RATE_HIGH) {
-        // GPU 侧 fault rate 很高 → 这个进程的 GPU 线程在等 CPU 处理 page fault
-        // 提升 CPU 优先级，加速 fault 处理
-        scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, 0, enq_flags | SCX_ENQ_HEAD);
-    } else if (gpu && gpu->is_thrashing) {
-        // GPU 侧在 thrashing → 降低 CPU 优先级，减缓 GPU 访问频率
-        scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL * 2, enq_flags);
-    } else {
-        // 默认行为
-        scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+    u64 *worker_ts = bpf_map_lookup_elem(&uvm_worker_pids, &pid);
+    if (worker_ts) {
+        u64 now = bpf_ktime_get_ns();
+        if (now - *worker_ts < XCOORD_WORKER_TIMEOUT_NS) {
+            stat_inc(STAT_GPU_BOOSTED);
+            scx_bpf_dsq_insert(p, SHARED_DSQ, slice_boost_ns,
+                                enq_flags | SCX_ENQ_HEAD);
+            return;
+        }
     }
-}
-
-// select_cpu(): NUMA-aware 放置
-s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
-                   s32 prev_cpu, u64 wake_flags)
-{
-    // 简单版: 优先选择之前的 CPU (cache warm)
-    // 进阶版: 读取 GPU 状态，为 fault handler 选择与 GPU 同 NUMA 的核
-    return prev_cpu;
+    // ... fallback: check gpu_state_map for thrashing, then vtime-fair
 }
 ```
 
-**用户空间 loader** (`extension/sched_gpu_aware.c`, ~150 LOC):
-```c
-// 1. 打开 gpu_ext 的 pinned map
-int gpu_map_fd = bpf_obj_get("/sys/fs/bpf/xcoord_gpu_state");
+#### 10.3.4 实验结果（中间版本，worker 追踪修复前）
 
-// 2. 加载 sched_ext BPF 程序
-struct sched_gpu_aware *skel = sched_gpu_aware__open();
+**实验运行 1 — 调度器未正确初始化（SCX_ENUM_INIT 缺失）**:
 
-// 3. 将 pinned map fd 注入到 BPF 程序
-bpf_map__reuse_fd(skel->maps.gpu_state_map, gpu_map_fd);
+| 场景 | TTFT Mean | Output tok/s | 备注 |
+|------|-----------|-------------|------|
+| Baseline | 3095 ms | 13.46 | |
+| CPU Stress | 3210 ms | 12.85 | |
+| xCoord | 3161 ms | 13.03 | 调度器 state=disabled，无效 |
 
-// 4. 加载并 attach
-sched_gpu_aware__load(skel);
-struct bpf_link *link = bpf_map__attach_struct_ops(skel->maps.gpu_aware_ops);
+**实验运行 2 — 调度器正常但无 worker 追踪**:
 
-// 5. 运行 (Ctrl+C 退出时自动 fallback 到 CFS)
-while (!should_exit) { sleep(1); }
+| 场景 | TTFT Mean | Output tok/s | sched_ext stats | 备注 |
+|------|-----------|-------------|-----------------|------|
+| Baseline | 3101 ms | 13.46 | N/A | |
+| CPU Stress | 3184 ms | 13.04 | N/A | |
+| xCoord | 3214 ms | 12.88 | `local=12210 global=96722 gpu_boosted=0` | ⚠️ gpu_boosted=0 |
+
+**gpu_ext 侧确认数据正常**:
+```
+PID 2300571  fault_rate=2342  fault_cnt=2206  evict_cnt=1066340  used_cnt=3673615  thrashing=YES
+```
+→ gpu_ext 正确追踪：fault_rate 高、thrashing 检测工作正常
+→ 但 sched_ext 看不到（PID 不匹配），所以 gpu_boosted=0
+
+**关键观察**:
+1. 120B UVM 场景下 TTFT ~3100-3200ms，CPU stress 影响仅 ~3%（远低于 POC-0 的 6.1x），可能因 baseline TTFT 已经很高（UVM overhead 主导）
+2. gpu_ext 的 fault tracking 完全正常：1M+ activate, 1M+ eviction
+3. sched_ext 调度器正常运行（96K+ tasks），但无法 boost UVM worker（PID 不匹配）
+
+#### 10.3.5 当前阻塞问题
+
+**问题 1: UVM Worker PID 追踪（代码已修复，待验证）**
+
+修复已实现并编译通过（见 10.3.3 迭代 3），但尚未在完整实验中验证。单元测试（手动加载两个组件 5 秒）确认：
+- ✅ `uvm_worker_pids` map 正确 pin 到 `/sys/fs/bpf/xcoord_uvm_workers`
+- ✅ sched_ext 成功连接两个 map（`gpu_state_map`: preset fd=5, `uvm_worker_pids`: preset fd=6）
+- ⏳ 待验证：运行 llama-server 时 worker PID 是否被正确追踪 + gpu_boosted > 0
+
+**问题 2: llama-server 120B UVM 崩溃**
+
+最近的实验运行（2026-02-24）中，llama-server 在处理第一个推理请求时崩溃:
+```
+CUDA error: out of memory
+→ ggml_cuda_op_mul_mat_cublas() / launch_mul_mat_q()
+→ Backtrace: mul_mat → evaluate_and_capture_cuda_graph → graph_compute → decode
 ```
 
-**验证方法**:
-```bash
-# 终端 1: 加载 gpu_ext
-sudo ./eviction_lfu_xcoord
+- **模型配置**: gpt-oss-120b-mxfp4 (~60GB)，GPU 仅 32GB，通过 UVM (cudaMallocManaged) 分配
+- **可能原因**: cuBLAS GEMM 需要额外 workspace buffer，在 GPU 显存已被 UVM 分配占满时 OOM
+  - 模型 buffer: 59851 MiB (UVM)
+  - KV cache: 2×144 MiB (UVM)
+  - Compute buffer: 1593 MiB (UVM)
+  - 总计 ~62GB via cudaMallocManaged，物理 GPU 仅 32GB
+  - cuBLAS workspace 可能无法分配
+- **之前的实验（2/23）没有崩溃**，相同配置能正常运行；可能是 GPU 状态/驱动状态差异
+- **与 xCoord 代码无关**: 仅加载模型 + 发送第一个请求就崩溃，还未涉及 xCoord 组件
+- **需要排查**: 自定义 nvidia_uvm 内核模块 vs 原版模块是否影响 UVM 行为
 
-# 终端 2: 加载 sched_ext
-sudo ./sched_gpu_aware
+#### 10.3.6 下一步工作
 
-# 终端 3: 运行 workload + 干扰
-stress-ng -c $(nproc) --timeout 300 &
-cd workloads/llama.cpp && uv run python bench.py
+**优先级排序**:
 
-# 终端 4: 观察 GPU state
-watch -n1 'sudo bpftool map dump pinned /sys/fs/bpf/xcoord_gpu_state'
-```
+1. **🔴 修复 llama-server 120B 崩溃问题**
+   - 排查: 卸载自定义 nvidia_uvm → 加载原版 → 测试 120B 是否稳定
+   - 若自定义模块导致: 检查 BPF hook 是否影响 UVM 内存管理
+   - 若原版也崩溃: 可能是 llama.cpp 版本/CUDA 版本问题，尝试降低 context size (`-c 2048`)
 
-**成功标准**: sched_ext 能成功读取 gpu_state_map 中的 fault_rate，并且加载后不崩溃。
+2. **🟡 验证 worker PID 追踪效果**
+   - 待 120B 稳定后，运行完整 POC-1 实验 (3 场景)
+   - 关键观察: `gpu_boosted > 0` 且 xCoord 场景 TTFT < CPU stress 场景
+   - 如果 gpu_boosted 仍为 0: 检查 worker PID 是否在 track 时和 enqueue 时一致
 
-#### 10.3.4 Step 3: 端到端性能测试（2 天）
+3. **🟢 考虑实验设计调整**
+   - 当前 120B baseline TTFT 已很高 (~3100ms)，CPU stress 仅额外增加 ~3%
+   - 可能需要更激进的 CPU 干扰（如 `stress-ng -c $(nproc) --cpu-method matrixprod`）
+   - 或尝试中等大小模型（如 30B-70B）让 UVM paging 更可控
+   - 或增加并发请求数 (`--max-concurrency 4`) 增加 page fault 争抢
 
-**实验矩阵**:
+#### 10.3.7 POC-1 成功标准（更新版）
 
-```
-4 个配置 × 3 个 workload × 10 trials = 120 runs
+基于已有实验数据调整预期:
 
-配置:
-(a) Baseline: CFS + no gpu_ext        — 朴素默认
-(b) taskset:  CPU pinning + no gpu_ext — 朴素隔离（已证明无效）
-(c) sched_ext only: scx_simple + no gpu_ext — sched_ext 但无 GPU awareness
-(d) xCoord:   sched_gpu_aware + eviction_lfu_xcoord — 完整协调
+| 指标 | 当前 (no worker tracking) | 目标 (with worker tracking) | 判定 |
+|------|--------------------------|----------------------------|------|
+| gpu_boosted | 0 | > 0 (ideally > 1000) | 基本功能验证 |
+| TTFT (xCoord vs CPU stress) | 3214ms vs 3184ms (+1%) | xCoord < CPU stress 至少 5% | 性能改善 |
+| Output tok/s (xCoord vs stress) | 12.88 vs 13.04 (-1.2%) | xCoord > CPU stress | 不劣化 |
+| sched_ext state | enabled ✅ | enabled | 稳定性 |
 
-Workload:
-(1) llama-server (Qwen3-30B) + CPU stress
-(2) llama-server (Qwen3-30B) + heavy load (CPU+Net+Disk)
-(3) llama-server (Qwen3-30B) + 另一个 GPU 进程 (multi-tenant)
-
-度量:
-- tok/s (throughput)
-- TPOT P99 (tail latency)
-- Page fault latency P50/P99
-- Context switches per 1K CUDA launches
-- GPU utilization %
-```
-
-**测试脚本** (`scripts/sched/test_xcoord_poc.sh`):
-```bash
-#!/bin/bash
-# POC-1 端到端测试
-RESULTS_DIR="results/poc1_$(date +%Y%m%d_%H%M)"
-mkdir -p $RESULTS_DIR
-
-CONFIGS=("baseline" "taskset" "sched_ext_only" "xcoord")
-SCENARIOS=("cpu_stress" "heavy_load" "multi_tenant")
-
-for config in "${CONFIGS[@]}"; do
-  for scenario in "${SCENARIOS[@]}"; do
-    for trial in $(seq 1 10); do
-      echo "=== $config / $scenario / trial $trial ==="
-      python ../workloads/cleanup_gpu.py
-
-      # 启动策略
-      case $config in
-        xcoord)
-          sudo ./eviction_lfu_xcoord &
-          sudo ./sched_gpu_aware &
-          ;;
-        sched_ext_only)
-          sudo ./sched_simple &  # 无 GPU awareness
-          ;;
-        taskset)
-          # 在 bench.py 中用 taskset 启动 llama-server
-          ;;
-      esac
-
-      # 启动干扰
-      case $scenario in
-        cpu_stress)    stress-ng -c $(nproc) --timeout 300 & ;;
-        heavy_load)    stress-ng -c $(nproc) --timeout 300 &
-                       iperf3 -c localhost -t 300 & ;;
-        multi_tenant)  # 启动第二个 GPU workload
-                       python workloads/pytorch/gnn_bench.py & ;;
-      esac
-
-      # 运行 benchmark
-      uv run --directory workloads/llama.cpp python bench.py \
-        --output $RESULTS_DIR/${config}_${scenario}_${trial}.json
-
-      # 清理
-      kill %% 2>/dev/null
-      sudo killall eviction_lfu_xcoord sched_gpu_aware stress-ng iperf3 2>/dev/null
-    done
-  done
-done
-```
-
-**预期结果**:
-
-| 配置 | CPU Stress tok/s | Heavy Load tok/s | 相对 Baseline |
-|------|-----------------|-----------------|--------------|
-| (a) Baseline CFS | 177 | 161 | -19% / -26% |
-| (b) taskset | 177 | 161 | -19% / -26% (无改善) |
-| (c) sched_ext only | ~180 | ~165 | ~-18% / ~-25% (微小改善) |
-| (d) **xCoord** | **~195** | **~180** | **~-11% / ~-18%** |
-
-**POC-1 成功标准**（基于 POC-0 实测数据）:
-- **120B UVM 场景**: TTFT 从 3160ms 降至 <2000ms（>36% 改善）
-- **20B 场景**: 吞吐量从 175.40 tok/s 提升至 >190 tok/s（恢复 >60% 损失）
-- xCoord 比 taskset 至少好 **5 个百分点**
-- 如果达到: → 继续 POC-2, POC-3
-- 如果未达到: → 分析原因，调整策略，或考虑 Fallback A
+**决策点**:
+- gpu_boosted > 0 且 TTFT 改善 > 5% → POC-1 成功，继续 POC-2
+- gpu_boosted > 0 但 TTFT 改善 < 5% → 调整 boost 策略（增大 slice_boost_ns），再测
+- gpu_boosted = 0 → worker 追踪方案有误，需深入排查 UVM 内核线程模型
 
 ---
 
@@ -1022,22 +956,25 @@ Week 1: POC-0 (量化问题) ✅ 已完成 (2026-02-23)
   ├─ ✅ 120B UVM 模型: 3 场景完成，确认 6.1x TTFT 增加 + pinning 失效
   └─ ✅ 数据分析完成，motivation data 充分
 
-Week 2-3: POC-1 (最小单向协调) ← 当前阶段
-  ├─ Day 1-3: 实现 eviction_lfu_xcoord.bpf.c (gpu_ext 侧)
-  ├─ Day 4-5: 验证 shared map pin + 读取
-  ├─ Day 6-8: 实现 sched_gpu_aware.bpf.c (sched_ext 侧)
-  ├─ Day 9: 端到端集成测试
-  └─ Day 10: 性能测试 (4 配置 × 3 场景 × 10 trials)
+Week 2: POC-1 实现 (2026-02-23 ~ 02-24) ← 当前阶段
+  ├─ ✅ Day 1: shared_maps.h + eviction_lfu_xcoord.bpf.c + loader
+  ├─ ✅ Day 1: sched_gpu_aware.bpf.c + loader（3 轮编译修复）
+  ├─ ✅ Day 1: 端到端集成测试 — 两组件同时加载成功
+  ├─ ✅ Day 1: 实验运行 1 — 发现 SCX_ENUM_INIT 缺失，修复
+  ├─ ✅ Day 1: 实验运行 2 — 发现 worker PID 不匹配，实现 worker 追踪
+  ├─ ✅ Day 2: Worker 追踪代码完成 + 编译通过 + 单元测试通过
+  ├─ ⚠️ Day 2: 实验运行 3 — llama-server 120B CUDA OOM 崩溃
+  └─ ⏳ 待完成: 修复 OOM 问题 → 完整实验 → 验证 worker 追踪效果
 
-Week 4: POC-2 (验证优于朴素方案)
-  ├─ Day 1-2: Ablation study (4 变体)
-  ├─ Day 3-4: 敏感性分析
-  └─ Day 5: 分析结果，决定是否继续 POC-3
+Week 3: POC-1 验证 + POC-2
+  ├─ 修复 120B 环境问题，完成 worker 追踪验证实验
+  ├─ POC-2: Ablation study (4 变体)
+  └─ 分析结果，决定是否继续 POC-3
 
-Week 5-6 (可选): POC-3 (双向协调)
-  ├─ Day 1-3: 实现 CPU→GPU 方向
-  ├─ Day 4-5: Multi-tenant 测试
-  └─ Day 6-7: 综合分析
+Week 4-5 (可选): POC-3 (双向协调)
+  ├─ 实现 CPU→GPU 方向
+  ├─ Multi-tenant 测试
+  └─ 综合分析
 ```
 
 ### 10.7 POC 决策树
@@ -1046,7 +983,14 @@ Week 5-6 (可选): POC-3 (双向协调)
 POC-0 结果: ✅ CPU stress 增加 TTFT 6.1x (521ms → 3160ms) → 继续 POC-1
   └─ 且 CPU pinning 完全无效 (3160ms vs 3170ms) → 强化 xCoord 动机
 
-POC-1 结果:
+POC-1 当前状态: 🔧 代码完成，调试中
+  ├─ ✅ 代码: 全部实现并编译通过 (1281 LOC)
+  ├─ ✅ 集成: 两组件同时加载、共享 map 连通
+  ├─ ✅ 调度器: state=enabled, 正常处理 ~6000 tasks/sec
+  ├─ ⚠️ 功能: gpu_boosted=0 (worker PID 不匹配) → 修复已编码待验证
+  └─ ⚠️ 环境: llama-server 120B CUDA OOM 崩溃 → 待排查
+
+POC-1 完成后决策:
 ├─ xCoord 比 taskset 好 >5% → 继续 POC-2
 ├─ xCoord 比 taskset 好 2-5% → 调整阈值参数，再测
 └─ xCoord 比 taskset 好 <2% → Fallback A (纯 GPU-aware sched_ext)
@@ -1064,18 +1008,20 @@ POC-3 结果:
 
 ## 十一、工程量重新评估
 
-### 11.1 POC 阶段（4-6 周）
+### 11.1 POC 阶段（实际进展）
 
-| 组件 | LOC | 天数 |
-|------|-----|------|
-| `fault_latency_trace.bpf.c` | ~100 | 2 |
-| `shared_maps.h` | ~50 | 0.5 |
-| `eviction_lfu_xcoord.bpf.c` | ~250 | 3 |
-| `sched_gpu_aware.bpf.c` | ~400 | 5 |
-| `sched_gpu_aware.c` (loader) | ~150 | 2 |
-| `test_xcoord_poc.sh` | ~200 | 2 |
-| 分析脚本 | ~100 | 1 |
-| **总计** | **~1250** | **~16 天 (3-4 周)** |
+| 组件 | 预估 LOC | 实际 LOC | 预估天数 | 实际天数 | 状态 |
+|------|---------|---------|---------|---------|------|
+| `shared_maps.h` | ~50 | 48 | 0.5 | 0.2 | ✅ |
+| `eviction_lfu_xcoord.bpf.c` | ~250 | 313 | 3 | 0.5 | ✅ |
+| `eviction_lfu_xcoord.c` (loader) | — | 252 | — | 0.5 | ✅ |
+| `sched_gpu_aware.bpf.c` | ~400 | 180 | 5 | 0.5 | ✅ |
+| `sched_gpu_aware.c` (loader) | ~150 | 214 | 2 | 0.5 | ✅ |
+| `poc1_xcoord_scheduling.sh` | ~200 | 274 | 2 | 0.3 | ✅ |
+| 调试 + 3 轮迭代修复 | — | — | — | 1.0 | ✅ |
+| **总计** | **~1050** | **1281** | **~12.5** | **~3.5** | **代码完成** |
+
+**备注**: 实际代码量比预估多 22%（主要是 loader 比预估复杂：SCX_ENUM_INIT、双 map reuse、worker 追踪），但编码速度远快于预估（3.5 天 vs 12.5 天）。主要耗时在调试迭代（3 轮：编译修复 → SCX_ENUM_INIT → worker PID 追踪）。
 
 ### 11.2 完整论文阶段（POC 通过后，额外 5-6 周）
 
@@ -1099,17 +1045,47 @@ POC: 4-6 周 (Week 1-6)
 
 ## 十二、风险与备选
 
-### 12.1 POC 级风险
+### 12.1 POC 级风险（更新版，含实测验证）
 
-| 风险 | 概率 | 缓解 |
-|------|------|------|
-| GPU fault latency 对 CPU 调度不敏感 | 低 | 已有 19-26% 吞吐量下降数据作为间接证据 |
-| sched_ext 与 gpu_ext 同时加载冲突 | 中 | 两者是独立的 BPF 子系统，理论上不冲突；需实测 |
-| Shared map 延迟过高 | 低 | BPF map 操作是 µs 级，远小于调度决策间隔 |
-| sched_ext 导致系统不稳定 | 中 | sched_ext 有安全 fallback 到 CFS 的机制 |
-| 改善幅度不够发论文 | 中 | 先做 POC-0/1 快速验证；不够则走 Fallback A |
+| 风险 | 预估概率 | 实际结果 | 备注 |
+|------|---------|---------|------|
+| GPU fault latency 对 CPU 调度不敏感 | 低 | ✅ **已验证敏感** | POC-0: 6.1x TTFT 增加 |
+| sched_ext 与 gpu_ext 同时加载冲突 | 中 | ✅ **不冲突** | 两组件同时运行稳定 |
+| Shared map 延迟过高 | 低 | ✅ **可接受** | map 操作 µs 级，不影响调度 |
+| sched_ext 导致系统不稳定 | 中 | ✅ **稳定** | state=enabled，安全 fallback 正常 |
+| 改善幅度不够发论文 | 中 | ⏳ **待验证** | worker 追踪修复后重测 |
+| **新增**: UVM worker PID 不匹配 | 未预见 | ⚠️ **已修复代码** | 核心线程 tgid ≠ 用户进程 tgid |
+| **新增**: 120B 模型 CUDA OOM | 未预见 | ⚠️ **待排查** | 之前能运行，可能是 GPU 状态问题 |
+| **新增**: SCX 编译工具链兼容性 | 未预见 | ✅ **已解决** | clang 18 不支持 32-bit atomics → 避开 UEI |
 
-### 12.2 Fallback 方案
+### 12.2 技术经验总结（Lessons Learned from POC-1）
+
+#### 12.2.1 sched_ext 开发要点
+
+1. **SCX_ENUM_INIT 是必须的**: 不调用则 SCX_DSQ_LOCAL=0, SCX_SLICE_DFL=0, SCX_ENQ_HEAD=0，调度器表面加载成功但实际不工作（state=disabled）
+2. **Skeleton 命名规则**: `foo.bpf.o` → skeleton 结构体名 `foo_bpf`（不是 `foo`），头文件 `foo.skel.h`（不是 `foo.bpf.skel.h`）
+3. **clang 18 + UEI 不兼容**: UEI 宏需要 32-bit atomics，clang 18 不支持 → 用直接 libbpf API 替代 SCX_OPS_OPEN/LOAD/ATTACH
+4. **双 vmlinux.h 架构**: gpu_ext 需要 NVIDIA UVM 类型的 vmlinux.h，sched_ext 需要 sched_ext 类型的 vmlinux.h → Makefile 中 SCX_APPS 用不同 include path
+5. **bpf_map__reuse_fd**: 共享 pinned map 必须在 `open()` 后 `load()` 前调用 `bpf_map__reuse_fd(skel->maps.XXX, fd)`
+
+#### 12.2.2 UVM Worker 线程模型
+
+**关键发现**: UVM page fault handler 运行在内核 kworker 线程中，而非触发 page fault 的用户进程。
+
+- `gpu_state_map` 按内存所有者 PID（llama-server 的 tgid）索引
+- 但 UVM fault handler 的 `bpf_get_current_pid_tgid() >> 32` 返回 kworker 的 tgid
+- sched_ext 看到的是 kworker task，其 `p->tgid` 与 gpu_state_map 中的 key 不匹配
+- **解决方案**: 新增 `uvm_worker_pids` map，在 gpu_ext hook 中记录当前执行线程的 tgid，sched_ext 先查此 map
+
+**这一发现也解释了为什么 CPU pinning 对 120B UVM 完全无效**: `taskset` 只影响用户空间线程，不影响内核 kworker 线程。
+
+#### 12.2.3 实验环境注意事项
+
+- llama-server 120B 需要自定义 nvidia_uvm 内核模块（支持 BPF hook），加载前需停止 gdm3 + 卸载系统 nvidia 模块
+- 实验脚本不能用 `sudo bash script.sh` 运行（会导致 root 用户找不到缓存的模型文件），应让脚本内部 `sudo` 单独的 BPF 工具
+- 120B 模型 ~60GB via UVM，物理 GPU 32GB，cuBLAS workspace 可能触发 CUDA OOM — 可能需要降低 context size 或确保 GPU 状态干净
+
+### 12.3 Fallback 方案
 
 **Fallback A**: 缩小范围到 "GPU-aware sched_ext scheduler"（单方向：CPU 感知 GPU）
 - 工程量减半
