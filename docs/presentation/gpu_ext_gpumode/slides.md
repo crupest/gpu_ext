@@ -18,11 +18,11 @@ colorSchema: light
 <div class="text-4xl font-bold leading-relaxed">Extending eBPF to GPU Device and Driver Contexts</div>
 
 <div class="mt-6 text-lg">
-Yusheng Zheng, Tong Yu
+Yusheng Zheng
 </div>
 
 <div class="text-sm opacity-80 mt-2">
-eunomia-bpf community
+eunomia-bpf & UCSC
 </div>
 
 </div>
@@ -43,18 +43,18 @@ eunomia-bpf community
 <div>
 
 ### Background
-
 - GPU Stack Overview
 - Workload Diversity
 
 ### The Problem
-
 - Black Boxes: What's Happening Inside?
 - Static Policies vs Diverse Workloads
 - Existing Solutions & Limitations
 
 ### Insight
-- GPU needs an observable, extensible OS policy interface
+- GPU needs an observable, extensible OS interface
+
+### What is eBPF? How to write it?
 
 </div>
 
@@ -68,9 +68,7 @@ eunomia-bpf community
 
 **gpu_ext**: Extending GPU Driver with eBPF
    - Memory & Scheduling struct_ops for resource management
-
-**Cross-layer Coordination**
-   - Cross Device eBPF Maps
+   - Cross-layer eBPF Maps (CPU ↔ GPU)
 
 </div>
 
@@ -229,7 +227,7 @@ eunomia-bpf community
 ### Memory Placement / Offloading
 
 - HBM expensive & limited (RTX 5090: 32GB)
-- Models exceed VRAM: MoE, KV-cache in inference / Dataset big in traning
+- Models exceed VRAM: MoE, KV-cache in inference / Large datasets in training
 
 ### Multi-tenancy Scheduling
 
@@ -249,23 +247,23 @@ eunomia-bpf community
 
 <div>
 
-### Invisible — Black Boxes
+### Invisible: Black Boxes
 
 - **Runtime (CUDA)**: closed-source, internal state not exposed
-- **Driver **: why did it evict this page? What access pattern?
+- **Driver**: why did it evict this page? What access pattern? CUPTI only gives fixed events
 - **Firmware**: completely closed-source
 - **Device execution**: no per-thread/warp metrics from host
-- Cannot correlate CPU launch → GPU execution
+- Hard to correlate CPU → GPU
 
 </div>
 
 <div>
 
-### Inflexible — Static Policies
+### Inflexible: Static Policies
 
 - **Driver UVM Memory**: LRU eviction, tree-based prefetch
 - **Driver Scheduling**: Round-robin, fixed timeslice
-- **Device Scheduling**: CLC (Hopper+) limited to block placement
+- **Device Thread Scheduling**: Fixed until CLC (Blackwell)
 - No per-workload or per-tenant differentiation
 - Hard to change: LD_PRELOAD limited scope, kernel driver code hard to modify safely
 
@@ -282,17 +280,17 @@ eunomia-bpf community
 <div class="border-l-4 border-blue-500 pl-3">
 
 **User-space Runtimes** (vLLM, Sglang, ktransformer) and
-**Userspace shims** (XSched..)
+**Userspace LD_PRELOAD shims** (XSched, etc.)
 - Application-bound
 - No cross-tenant visibility and control
-- Cannot access low level driver mechanisms
+- Cannot access low-level driver mechanisms
 
 </div>
 
 <div class="border-l-4 border-green-500 pl-3">
 
-**Driver Modifications** (TimeGraph, Gdev, GPreempt)
-- Policies are hard code, hard to maintain and deploy
+**Driver Modifications** (TimeGraph, Gdev, GPreempt...)
+- Policies are hardcoded, hard to maintain and deploy
 - Safety risks
 
 </div>
@@ -300,17 +298,56 @@ eunomia-bpf community
 <div class="border-l-4 border-orange-500 pl-3">
 
 **Device Profilers** (NVBit, Neutrino, CUPTI)
+
+- High overhead (NVBit)
+- Limited per-thread visibility (CUPTI)
+- Hard for cross-layer programmability
 - Read-only: cannot modify behavior or inject logic
-- High overhead (NVBit 85-93%), NVBit needs LD_PRELOAD
-- No per-thread visibility (CUPTI), no cross-layer (NVBit)
 
 </div>
 
 <div class="border-l-4 border-purple-500 pl-3">
 
-**Host eBPF**
+**Linux Kernel Tracing** (eBPF, ftrace)
 - GPU device remains a black box
 - No programmable hooks in GPU driver for control
+
+</div>
+
+</div>
+
+---
+
+# Insight: GPU Needs an Observable, Extensible OS Interface
+
+<div class="grid grid-cols-2 gap-6">
+
+<div class="border-2 border-orange-500 rounded-lg p-4">
+
+### Observable: Why?
+
+- Device execution state invisible from host
+  - Warp divergence, SM load, memory access patterns
+- Existing profilers: read-only, high overhead, coarse-grained
+- Need **fine-grained, low-overhead, cross-layer** observability
+
+<div class="mt-3 p-2 bg-orange-50 rounded text-base">
+→ Requires instrumentation <b>on GPU device</b>
+</div>
+
+</div>
+
+<div class="border-2 border-blue-500 rounded-lg p-4">
+
+### Extensible: Why?
+
+- Driver has **global cross-tenant visibility** and hardware control
+- But policies are hardcoded, hard to change safely
+- Need **safe, dynamic, per-workload** policy customization
+
+<div class="mt-3 p-2 bg-blue-50 rounded text-base">
+→ Programmable hooks <b>in GPU driver</b> (like sched_ext)
+</div>
 
 </div>
 
@@ -323,7 +360,7 @@ eunomia-bpf community
 <div class="flex flex-col items-center">
 
 <div class="text-lg mb-4">
-Safe, dynamic, verified programs that extend the Linux kernel — <b>without modifying kernel source</b>
+Safe, dynamic, verified programs that extend the Linux kernel, <b>without modifying kernel source</b>
 </div>
 
 <img src="/ebpf.png" class="rounded shadow-lg" style="max-height: 320px;" alt="eBPF Overview" />
@@ -337,42 +374,6 @@ Safe, dynamic, verified programs that extend the Linux kernel — <b>without mod
 </div>
 
 <div class="text-xs mt-3 opacity-50">Source: ebpf.io</div>
-
-</div>
-
----
-
-# Why eBPF?
-
-<div class="grid grid-cols-2 gap-6 text-sm">
-
-<div class="border-2 border-blue-500 rounded-lg p-3">
-
-### Proven in Traditional Systems
-
-- **Observability**: bpftrace, BCC — trace any kernel function
-- **sched_ext**: custom CPU schedulers (Linux 6.12, Meta & Google)
-- **XDP**: programmable packet processing
-
-
-</div>
-
-<div class="border-2 border-green-500 rounded-lg p-3">
-
-### Same Problem in GPU
-
-**Invisible**: profilers are read-only, high overhead, coarse-grained
-
-**Inflexible**: hardcoded eviction, prefetch, scheduling — no per-tenant differentiation
-
-→ Same problem as CPU before sched_ext
-
-**eBPF Makes GPU Visible + Flexible**
-- **gpu_ext**: driver policy hooks + access pattern tracing
-- **bpftime**: per-thread profiling on GPU (3-14% overhead)
-- **No app modifications** needed
-
-</div>
 
 </div>
 
@@ -393,7 +394,7 @@ struct {
     __type(value, u64);
 } call_counts SEC(".maps");
 
-// Attach to kernel function (Hook)
+// Attach to Linux kernel function (Hook)
 SEC("kprobe/do_sys_open")
 int count_opens(struct pt_regs *ctx) {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -417,9 +418,9 @@ int count_opens(struct pt_regs *ctx) {
 ### Core Concepts
 
 - **Programs**: small C → eBPF bytecode (clang/LLVM)
-- **Hooks**: attach to kernel functions, tracepoints, etc.
-- **Maps**: shared key-value data (kernel ↔ userspace)
-- **Helpers**: safe kernel API (`bpf_get_current_pid_tgid`, `bpf_ktime_get_ns`, ...)
+- **Hooks**: attach to Linux kernel functions, tracepoints, etc.
+- **Maps**: shared key-value data (Linux kernel ↔ userspace)
+- **Helpers**: safe Linux kernel API (`bpf_get_current_pid_tgid`, `bpf_ktime_get_ns`, ...)
 - **Verifier**: guarantees safety before execution
   - No crashes, no infinite loops, bounded memory
 
@@ -428,45 +429,8 @@ int count_opens(struct pt_regs *ctx) {
 Think of it like **CUPTI callbacks**, but:
 - You write **your own logic** (not just read events)
 - **Dynamically attach** without restarting
-- **Verified safe** — kernel guarantees no harm
+- **Verified safe**: Linux kernel guarantees no harm
 - Can **modify behavior**, not just observe
-
-</div>
-
-</div>
-
----
-
-# Insight: GPU Needs an Observable, Extensible OS Interface
-
-<div class="grid grid-cols-2 gap-6">
-
-<div class="border-2 border-orange-500 rounded-lg p-4">
-
-### Observable — Why?
-
-- Device execution state invisible from host
-  - Warp divergence, SM load, memory access patterns
-- Existing profilers: read-only, high overhead, coarse-grained
-- Need **fine-grained, low-overhead, cross-layer** observability
-
-<div class="mt-3 p-2 bg-orange-50 rounded text-base">
-→ Requires instrumentation <b>on GPU device</b>
-</div>
-
-</div>
-
-<div class="border-2 border-blue-500 rounded-lg p-4">
-
-### Extensible — Why?
-
-- Driver has **global cross-tenant visibility** and hardware control
-- But policies are hardcoded, hard to change safely
-- Need **safe, dynamic, per-workload** policy customization
-
-<div class="mt-3 p-2 bg-blue-50 rounded text-base">
-→ Programmable hooks <b>in GPU driver</b> (like sched_ext)
-</div>
 
 </div>
 
@@ -500,7 +464,7 @@ Think of it like **CUPTI callbacks**, but:
 - Driver-level tracing: access patterns, fault behavior, scheduling events
 - Programmable memory policy: eviction, prefetch hooks in UVM
 - Programmable scheduling: TSG lifecycle hooks
-- Uses standard eBPF verifier + struct_ops
+- Uses standard eBPF verifier + struct_ops (Linux kernel callback interface)
 
 </div>
 
@@ -514,43 +478,6 @@ class: text-center
 # Part 1: Device eBPF
 
 Running eBPF on GPU Device (bpftime)
-
----
-
-# GPU Execution Model: Why eBPF on GPU is Hard
-
-<div class="grid grid-cols-2 gap-6">
-
-<div class="text-base">
-
-### SIMT Recap (Why It Matters for eBPF)
-
-- **Warp** (32 threads) executes in lockstep
-- Different branches → **serialization (Divergence)**
-- This means: naive per-thread eBPF would cause divergence & waste
-
-### Thread Hierarchy
-
-Thread → Warp (32) → Block → Grid → SM
-
-</div>
-
-<div>
-
-### Key Differences from CPU eBPF
-
-| Feature | CPU | GPU |
-|---------|-----|-----|
-| Thread count | Tens | Tens of thousands |
-| Scheduling unit | Single thread | Warp (32 threads) |
-| Branch handling | Prediction | Serialization |
-| Preemption | Full | Limited |
-
-**Challenge**: eBPF assumes scalar execution — GPU is SIMT
-
-</div>
-
-</div>
 
 ---
 
@@ -569,11 +496,11 @@ Thread → Warp (32) → Block → Grid → SM
 ### Runtime Adaptation
 
 - Respond to device state
-- Safe and Dynamic policy adjustment in GPU kernel
+- Safe and dynamic policy adjustment in GPU kernel
 
 ### Help Host-side Policies
 
-- Provide device visibility/controlility to host
+- Provide device visibility/controllability to host
 - Cross-layer coordination
 
 </div>
@@ -594,7 +521,7 @@ Traced by [bpftime/gpu/threadscheduling](https://github.com/eunomia-bpf/bpftime/
 
 ---
 
-# Example: launchlate - Kernel Launch Latency Profiler
+# Example: launchlate - GPU Kernel Launch Latency Profiler
 
 <div class="grid grid-cols-2 gap-4">
 
@@ -603,14 +530,14 @@ Traced by [bpftime/gpu/threadscheduling](https://github.com/eunomia-bpf/bpftime/
 ```c
 BPF_MAP_DEF(BPF_MAP_TYPE_ARRAY, launch_time);
 
-// CPU-side uprobe captures launch time
+// CPU-side hook: triggered at cudaLaunchKernel()
 SEC("uprobe/app:cudaLaunchKernel")
 int uprobe_launch(struct pt_regs *ctx) {
     u64 ts_cpu = bpf_ktime_get_ns();
     bpf_map_update_elem(&launch_time, &key, &ts_cpu, BPF_ANY);
 }
 
-// GPU-side kprobe captures execution start
+// GPU-side hook: triggered at GPU thread entry (per-thread)
 SEC("kprobe/_Z9vectorAddPKfS0_Pf")
 int kprobe_exec() {
     u64 ts_gpu = bpf_get_globaltimer();
@@ -626,18 +553,18 @@ int kprobe_exec() {
 
 ### Problem
 
-CUPTI shows kernel "started" quickly, but it's slow. Why?
+CUPTI shows GPU kernel "started" quickly, but it's slow. Why?
 
-**Hidden issue**: Thread blocks competing for SMs with other kernels (multi-process, multi-stream)
+**Hidden issue**: Thread blocks competing for SMs with other GPU kernels (multi-process, multi-stream)
 
-- **CUPTI sees**: Kernel start/end time (looks fine)
+- **CUPTI sees**: GPU kernel start/end time (looks fine)
 - **Reality**: Many blocks waiting for SM resources
-- **bpftime**: Per-thread block/warp scheduling timestamp inside kernel
+- **bpftime**: Per-thread block/warp scheduling timestamp inside GPU kernel
 
 ### How It Works
 
 1. **CPU uprobe**: Record T1 at `cudaLaunchKernel()`
-2. **GPU kprobe**: Record T2 **per-thread block** at kernel entry
+2. **GPU kprobe**: Record T2 **per-thread block** at GPU kernel entry
 3. See **when each thread block gets scheduled**
 
 
@@ -655,12 +582,12 @@ CUPTI shows kernel "started" quickly, but it's slow. Why?
 
 <div>
 
-### threadhist — Per-Thread Count
+### threadhist: Per-Thread Count
 
 <div class="text-xs">
 
 ```c
-// 89 LOC total — Per-thread isolated counter
+// 89 LOC total, per-thread isolated counter
 struct {
     __uint(type, BPF_MAP_TYPE_PERGPUTD_ARRAY_MAP);
     __uint(max_entries, 1);
@@ -686,12 +613,12 @@ int cuda__retprobe() {
 
 <div>
 
-### kernelretsnoop — Exit Timestamps
+### kernelretsnoop: Exit Timestamps
 
 <div class="text-xs">
 
 ```c
-// 153 LOC total — Stream per-thread events to host
+// 153 LOC total, stream per-thread events to host
 struct data { u64 x, y, z; u64 timestamp; };
 struct {
     __uint(type, BPF_MAP_TYPE_GPU_RINGBUF_MAP);
@@ -753,6 +680,39 @@ Tested on a P40 GPU with llama.cpp 1B inference.
 <div class="mt-2 p-2 bg-blue-50 rounded text-sm">
 
 **bpftime** = low overhead of CUPTI + programmability of NVBit + cross-layer visibility of Nsight
+
+</div>
+
+---
+
+# Why eBPF on GPU is Hard
+
+<div class="grid grid-cols-2 gap-6">
+
+<div class="text-base">
+
+### The Core Challenge
+
+SIMT: 32 threads per warp, lockstep execution, divergence = serialization.
+
+**Problem for eBPF**: naive per-thread eBPF would cause warp divergence & bandwidth waste across tens of thousands of threads.
+
+</div>
+
+<div>
+
+### Key Differences from CPU eBPF
+
+| Feature | CPU | GPU |
+|---------|-----|-----|
+| Thread count | Tens | Tens of thousands |
+| Scheduling unit | Single thread | Warp (32 threads) |
+| Branch handling | Prediction | Serialization |
+| Preemption | Full | Limited |
+
+**Challenge**: eBPF assumes scalar execution, GPU is SIMT
+
+</div>
 
 </div>
 
@@ -874,7 +834,7 @@ should_try_steal(State& s,
 
 **Problem**: PCIe latency ~40μs vs GPU local ~100ns (**400-1000x difference**)
 
-**Solution**: Logically Verify once, place at runtime
+**Solution**: Logically verify once, place at runtime
 
 | Data Type | Placement |
 |-----------|-----------|
@@ -886,7 +846,7 @@ should_try_steal(State& s,
 
 </div>
 
-Improved 60-80% performance for probes and helpers.
+Reduces overhead by 60-80% for probes and helpers.
 
 </div>
 
@@ -901,7 +861,7 @@ Extending Linux GPU Driver with eBPF
 
 ---
 
-# GPU Scheduling Concepts
+# GPU Task Scheduling Background
 
 <div class="grid grid-cols-3 gap-4">
 
@@ -917,7 +877,7 @@ Extending Linux GPU Driver with eBPF
 <div>
 
 ### Why TSG, Not GPU Kernels?
-- **Kernel launch bypasses driver** - userspace writes pushbuffer + doorbell via MMIO
+- **GPU kernel launch bypasses driver** - userspace writes pushbuffer + doorbell via MMIO
 - **Driver only sees TSG lifecycle** - create, bind, destroy
 
 </div>
@@ -942,7 +902,7 @@ Extending Linux GPU Driver with eBPF
 
 ---
 
-# GPU Memory Concepts
+# NVIDIA UVM (Unified Virtual Memory)
 
 <div class="grid grid-cols-3 gap-4">
 
@@ -953,6 +913,8 @@ Extending Linux GPU Driver with eBPF
 - **VA Block**: Virtual address range
 - **Chunk**: Physical block (2MB)
 - **Replayable Fault**: Warp paused → driver migrates → replay
+
+Slow blackbox policies push apps to manage memory themselves (like **DPDK** kernel bypass). But UVM offers transparent multi-tenant offload. We should make the driver **programmable**, not bypass it.
 
 </div>
 
@@ -976,7 +938,48 @@ Extending Linux GPU Driver with eBPF
 
 ---
 
-# Challenge: Expressiveness vs Safety
+# Driver-level and System-wide Observability
+
+<div class="grid grid-cols-2 gap-4">
+
+<div class="text-sm">
+
+### BPF Trace Tools (kprobe-based)
+
+- **chunk_trace**: UVM Memory chunk lifecycle (activate, populate, evict)
+  - Per-process tracking, VA block mappings, timing
+- **prefetch_trace**: UVM Prefetch decision process
+  - Bitmap trees, access patterns, region sizes
+- **gpu_sched_trace**: TSG scheduling events
+  - Engine types, timeslice config, interleave levels
+
+All attach dynamically via kprobes
+
+### Cross-layer: xpu-perf
+
+eBPF CPU tracing + GPU kernel in one profiler.
+- CPU uprobes at `cudaLaunchKernel` + GPU kernel correlation
+- Interactive flamegraph visualization
+
+</div>
+
+<div class="flex flex-col items-center justify-center">
+
+<img src="/xpu-perf-flamegraph.svg" class="rounded shadow-lg" style="max-height: 350px;" alt="xpu-perf CPU+GPU flamegraph" />
+
+<div class="text-xs mt-2 opacity-60">
+
+[github.com/eunomia-bpf/xpu-perf](https://github.com/eunomia-bpf/xpu-perf)
+
+</div>
+
+</div>
+
+</div>
+
+---
+
+# From Observability to Extensibility: Expressiveness vs Safety
 
 <div class="text-lg mt-4">
 
@@ -994,7 +997,7 @@ GPU drivers were **not designed** to expose a programmable interface
 
 ### Our Approach: Narrow, Safe Interface
 
-- Policy **advises**, kernel **decides**
+- Policy **advises**, driver **decides**
 - Expose **structured hooks**, not raw mechanisms; **Bounded operations** via kfuncs
 - Implemented as **struct_ops**
 
@@ -1049,9 +1052,9 @@ The default policy is LRU + tree-based prefetching. We impl:
 ### Safety: Programmable Cache Model
 
 - Policy can **reorder** eviction list, but **cannot remove**
-- Kernel picks final victim
+- Driver picks final victim
 - kfuncs only allow **move_head/move_tail** operations
-- Prefetch policy sets region, kernel validates bounds
+- Prefetch policy sets region, driver validates bounds
 
 </div>
 
@@ -1073,8 +1076,8 @@ struct gpu_sched_ops {
   // Ctx: tsg_id, engine_type, default_timeslice
   int (*task_init)(struct gpu_task_init_ctx *ctx);
   // Called when task group binds to runlist (ONE-TIME)
-  // Trigger: first kernel launch activates the TSG
-  // Note: subsequent kernel launches bypass driver!
+  // Trigger: first GPU kernel launch activates the TSG
+  // Note: subsequent GPU kernel launches bypass driver!
   // Can: admission control (reject bind)
   int (*task_bind)(struct gpu_task_bind_ctx *ctx);
   // Called when task group is destroyed
@@ -1155,10 +1158,10 @@ The default is round-robin / FIFO, we can impl:
 
 | Workload | Policy | Speedup |
 |----------|--------|---------|
-| LLM Expert (llama.cpp) | Stride prefetch + LFU eviction | **~4x** decode speedup vs default framework offloading |
-| KV-cache (vLLM) | LFU eviction + sequential prefetch | **~1.5x** less TTFT vs default framework offloading, close to LMCache|
+| LLM Expert (llama.cpp) | Stride prefetch + LFU eviction | **~4x** decode speedup vs llama.cpp built-in offloading |
+| KV-cache (vLLM) | LFU eviction + sequential prefetch | **~1.5x** lower TTFT vs vLLM built-in offloading |
 
-**Key**: 1) Hardware faster / sofware algorithm old -> Need to do more prefetching 2) Tree-based prefetch not optimal for LLM/ML (ALso tested with GNN / Vector DB)
+**Key**: 1) Hardware faster / software algorithm old -> Need to do more prefetching 2) Tree-based prefetch not optimal for LLM/ML (Also tested with GNN / Vector DB)
 
 </div>
 
@@ -1169,9 +1172,9 @@ The default is round-robin / FIFO, we can impl:
 | Scenario | Policy | Improvement |
 |----------|--------|-------------|
 | LC+BE Scheduling | LC 1s / BE 200μs timeslice | **95%** P99 ↓ |
-| Memory Priority | HP more prefetch and eviction protection, LP less | **55-92%** time ↓ |
+| Memory Priority | High-priority: more prefetch + eviction protection | **55-92%** time ↓ |
 
-**Key**: Default policy does not allow different process has different behavior: we can have priority.
+**Key**: Default policy does not differentiate between processes: we can add per-process priority.
 -  Compute-bound → Scheduling;
 - Memory-bound → Memory policy
 
@@ -1191,11 +1194,11 @@ The default is round-robin / FIFO, we can impl:
 
 Why not extend HMM or DRM?
 
-- Nvidia cuda computing is bypass the DRM.
-- HMM is like a interface, mechaism is still in driver.
+- NVIDIA CUDA computing bypasses DRM.
+- HMM is an interface; mechanism is still in driver.
 
 The design is portable:
-- POC in SPIR-v
+- POC in SPIR-V
 - ARM also has similar feature set.
 
 More standard API for all GPU drivers?
@@ -1217,6 +1220,5 @@ Cgroups?
 
 [github.com/eunomia-bpf/bpftime](https://github.com/eunomia-bpf/bpftime)
 
-Arxiv will be released soon.
-
+: https://arxiv.org/abs/2512.12615
 </div>
