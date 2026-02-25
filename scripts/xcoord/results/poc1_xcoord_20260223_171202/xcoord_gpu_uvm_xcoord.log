@@ -1,0 +1,776 @@
+libbpf: loading object 'eviction_lfu_xcoord_bpf' from buffer
+libbpf: elf: section(2) .symtab, size 984, link 1, flags 0, type=2
+libbpf: elf: section(3) struct_ops/uvm_pmm_chunk_activate, size 1144, link 0, flags 6, type=1
+libbpf: sec 'struct_ops/uvm_pmm_chunk_activate': found program 'uvm_pmm_chunk_activate' at insn offset 0 (0 bytes), code size 143 insns (1144 bytes)
+libbpf: elf: section(4) struct_ops/uvm_pmm_chunk_used, size 1408, link 0, flags 6, type=1
+libbpf: sec 'struct_ops/uvm_pmm_chunk_used': found program 'uvm_pmm_chunk_used' at insn offset 0 (0 bytes), code size 176 insns (1408 bytes)
+libbpf: elf: section(5) struct_ops/uvm_pmm_eviction_prepare, size 424, link 0, flags 6, type=1
+libbpf: sec 'struct_ops/uvm_pmm_eviction_prepare': found program 'uvm_pmm_eviction_prepare' at insn offset 0 (0 bytes), code size 53 insns (424 bytes)
+libbpf: elf: section(6) license, size 4, link 0, flags 3, type=1
+libbpf: license of eviction_lfu_xcoord_bpf is GPL
+libbpf: elf: section(7) .struct_ops, size 48, link 0, flags 3, type=1
+libbpf: elf: section(8) .maps, size 160, link 0, flags 3, type=1
+libbpf: elf: section(9) .relstruct_ops/uvm_pmm_chunk_activate, size 96, link 2, flags 40, type=9
+libbpf: elf: section(10) .relstruct_ops/uvm_pmm_chunk_used, size 160, link 2, flags 40, type=9
+libbpf: elf: section(11) .relstruct_ops/uvm_pmm_eviction_prepare, size 80, link 2, flags 40, type=9
+libbpf: elf: section(12) .rel.struct_ops, size 48, link 2, flags 40, type=9
+libbpf: elf: section(13) .BTF, size 40630, link 0, flags 0, type=1
+libbpf: elf: section(14) .BTF.ext, size 2796, link 0, flags 0, type=1
+libbpf: looking for externs among 41 symbols...
+libbpf: collected 1 externs total
+libbpf: extern (ksym) #0: symbol 37, name bpf_uvm_pmm_chunk_move_tail
+libbpf: map 'config': at sec_idx 8, offset 0.
+libbpf: map 'config': found type = 2.
+libbpf: map 'config': found key [8], sz = 4.
+libbpf: map 'config': found value [12], sz = 8.
+libbpf: map 'config': found max_entries = 8.
+libbpf: map 'pid_chunk_count': at sec_idx 8, offset 32.
+libbpf: map 'pid_chunk_count': found type = 1.
+libbpf: map 'pid_chunk_count': found key [8], sz = 4.
+libbpf: map 'pid_chunk_count': found value [22], sz = 40.
+libbpf: map 'pid_chunk_count': found max_entries = 256.
+libbpf: map 'active_chunks': at sec_idx 8, offset 64.
+libbpf: map 'active_chunks': found type = 1.
+libbpf: map 'active_chunks': found key [12], sz = 8.
+libbpf: map 'active_chunks': found value [8], sz = 4.
+libbpf: map 'active_chunks': found max_entries = 65536.
+libbpf: map 'chunk_access_count': at sec_idx 8, offset 96.
+libbpf: map 'chunk_access_count': found type = 1.
+libbpf: map 'chunk_access_count': found key [12], sz = 8.
+libbpf: map 'chunk_access_count': found value [12], sz = 8.
+libbpf: map 'chunk_access_count': found max_entries = 65536.
+libbpf: map 'gpu_state_map': at sec_idx 8, offset 128.
+libbpf: map 'gpu_state_map': found type = 1.
+libbpf: map 'gpu_state_map': found key [8], sz = 4.
+libbpf: map 'gpu_state_map': found value [32], sz = 48.
+libbpf: map 'gpu_state_map': found max_entries = 256.
+libbpf: struct_ops init: struct uvm_gpu_ext(type_id=466) uvm_ops_lfu_xcoord found at offset 0
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': collecting relocation for section(3) 'struct_ops/uvm_pmm_chunk_activate'
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #0: insn #70 against 'gpu_state_map'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 4 (gpu_state_map, sec 8, off 128) for insn #70
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #1: insn #101 against 'gpu_state_map'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 4 (gpu_state_map, sec 8, off 128) for insn #101
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #2: insn #107 against 'active_chunks'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 2 (active_chunks, sec 8, off 64) for insn #107
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #3: insn #115 against 'active_chunks'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 2 (active_chunks, sec 8, off 64) for insn #115
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #4: insn #120 against 'pid_chunk_count'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 1 (pid_chunk_count, sec 8, off 32) for insn #120
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_activate': relo #5: insn #137 against 'pid_chunk_count'
+libbpf: prog 'uvm_pmm_chunk_activate': found map 1 (pid_chunk_count, sec 8, off 32) for insn #137
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': collecting relocation for section(4) 'struct_ops/uvm_pmm_chunk_used'
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #0: insn #58 against 'gpu_state_map'
+libbpf: prog 'uvm_pmm_chunk_used': found map 4 (gpu_state_map, sec 8, off 128) for insn #58
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #1: insn #67 against 'config'
+libbpf: prog 'uvm_pmm_chunk_used': found map 0 (config, sec 8, off 0) for insn #67
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #2: insn #77 against 'config'
+libbpf: prog 'uvm_pmm_chunk_used': found map 0 (config, sec 8, off 0) for insn #77
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #3: insn #84 against 'pid_chunk_count'
+libbpf: prog 'uvm_pmm_chunk_used': found map 1 (pid_chunk_count, sec 8, off 32) for insn #84
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #4: insn #100 against 'config'
+libbpf: prog 'uvm_pmm_chunk_used': found map 0 (config, sec 8, off 0) for insn #100
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #5: insn #117 against 'config'
+libbpf: prog 'uvm_pmm_chunk_used': found map 0 (config, sec 8, off 0) for insn #117
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #6: insn #126 against 'config'
+libbpf: prog 'uvm_pmm_chunk_used': found map 0 (config, sec 8, off 0) for insn #126
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #7: insn #140 against 'chunk_access_count'
+libbpf: prog 'uvm_pmm_chunk_used': found map 3 (chunk_access_count, sec 8, off 96) for insn #140
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #8: insn #154 against 'chunk_access_count'
+libbpf: prog 'uvm_pmm_chunk_used': found map 3 (chunk_access_count, sec 8, off 96) for insn #154
+libbpf: sec '.relstruct_ops/uvm_pmm_chunk_used': relo #9: insn #163 against 'bpf_uvm_pmm_chunk_move_tail'
+libbpf: prog 'uvm_pmm_chunk_used': found extern #0 'bpf_uvm_pmm_chunk_move_tail' (sym 37) for insn #163
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': collecting relocation for section(5) 'struct_ops/uvm_pmm_eviction_prepare'
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': relo #0: insn #16 against 'active_chunks'
+libbpf: prog 'uvm_pmm_eviction_prepare': found map 2 (active_chunks, sec 8, off 64) for insn #16
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': relo #1: insn #25 against 'gpu_state_map'
+libbpf: prog 'uvm_pmm_eviction_prepare': found map 4 (gpu_state_map, sec 8, off 128) for insn #25
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': relo #2: insn #31 against 'pid_chunk_count'
+libbpf: prog 'uvm_pmm_eviction_prepare': found map 1 (pid_chunk_count, sec 8, off 32) for insn #31
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': relo #3: insn #43 against 'active_chunks'
+libbpf: prog 'uvm_pmm_eviction_prepare': found map 2 (active_chunks, sec 8, off 64) for insn #43
+libbpf: sec '.relstruct_ops/uvm_pmm_eviction_prepare': relo #4: insn #47 against 'chunk_access_count'
+libbpf: prog 'uvm_pmm_eviction_prepare': found map 3 (chunk_access_count, sec 8, off 96) for insn #47
+libbpf: struct_ops reloc uvm_ops_lfu_xcoord: for 30 value 0 shdr_idx 3 rel->r_offset 24 map->sec_offset 0 name 366 ('uvm_pmm_chunk_activate')
+libbpf: struct_ops reloc uvm_ops_lfu_xcoord: for 34 value 0 shdr_idx 4 rel->r_offset 32 map->sec_offset 0 name 433 ('uvm_pmm_chunk_used')
+libbpf: struct_ops reloc uvm_ops_lfu_xcoord: for 38 value 0 shdr_idx 5 rel->r_offset 40 map->sec_offset 0 name 506 ('uvm_pmm_eviction_prepare')
+libbpf: object 'eviction_lfu_xc': failed (-95) to create BPF token from '/sys/fs/bpf', skipping optional step...
+libbpf: loaded kernel BTF from '/sys/kernel/btf/vmlinux'
+libbpf: extern (func ksym) 'bpf_uvm_pmm_chunk_move_tail': resolved to nvidia_uvm [150208]
+libbpf: struct_ops init_kern uvm_ops_lfu_xcoord: type_id:466 kern_type_id:148506 kern_vtype_id:148521
+libbpf: struct_ops init_kern uvm_ops_lfu_xcoord: func ptr uvm_pmm_chunk_activate is set to prog uvm_pmm_chunk_activate from data(+24) to kern_data(+24)
+libbpf: struct_ops init_kern uvm_ops_lfu_xcoord: func ptr uvm_pmm_chunk_used is set to prog uvm_pmm_chunk_used from data(+32) to kern_data(+32)
+libbpf: struct_ops init_kern uvm_ops_lfu_xcoord: func ptr uvm_pmm_eviction_prepare is set to prog uvm_pmm_eviction_prepare from data(+40) to kern_data(+40)
+libbpf: sec 'struct_ops/uvm_pmm_chunk_activate': found 6 CO-RE relocations
+libbpf: CO-RE relocating [38] typedef uvm_gpu_chunk_t: found target candidate [147854] typedef uvm_gpu_chunk_t in [nvidia_uvm]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #0: <byte_off> [38] typedef uvm_gpu_chunk_t.va_block (0:3 @ offset 32)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #0: matching candidate #0 <byte_off> [147854] typedef uvm_gpu_chunk_t.va_block (0:3 @ offset 32)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #0: patched insn #9 (ALU/ALU64) imm 32 -> 32
+libbpf: CO-RE relocating [45] typedef uvm_va_block_t: found target candidate [147900] typedef uvm_va_block_t in [nvidia_uvm]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #1: <byte_off> [45] typedef uvm_va_block_t.managed_range (0:2 @ offset 40)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #1: matching candidate #0 <byte_off> [147900] typedef uvm_va_block_t.managed_range (0:2 @ offset 40)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #1: patched insn #17 (ALU/ALU64) imm 40 -> 40
+libbpf: CO-RE relocating [52] typedef uvm_va_range_managed_t: found target candidate [147894] typedef uvm_va_range_managed_t in [nvidia_uvm]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #2: <byte_off> [52] typedef uvm_va_range_managed_t.va_range.va_space (0:0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #2: matching candidate #0 <byte_off> [147894] typedef uvm_va_range_managed_t.va_range.va_space (0:0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #2: patched insn #25 (ALU/ALU64) imm 0 -> 0
+libbpf: CO-RE relocating [63] typedef uvm_va_space_t: found target candidate [147902] typedef uvm_va_space_t in [nvidia_uvm]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #3: <byte_off> [63] typedef uvm_va_space_t.va_space_mm.mm (0:1:0 @ offset 26688)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #3: matching candidate #0 <byte_off> [147902] typedef uvm_va_space_t.va_space_mm.mm (0:43:0 @ offset 367864)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #3: patched insn #33 (ALU/ALU64) imm 26688 -> 367864
+libbpf: CO-RE relocating [69] struct mm_struct: found target candidate [276] struct mm_struct in [vmlinux]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #4: <byte_off> [69] struct mm_struct.owner (0:0:43 @ offset 1496)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #4: matching candidate #0 <byte_off> [276] struct mm_struct.owner (0:0:51 @ offset 1176)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #4: patched insn #41 (ALU/ALU64) imm 1496 -> 1176
+libbpf: CO-RE relocating [187] struct task_struct: found target candidate [115] struct task_struct in [vmlinux]
+libbpf: prog 'uvm_pmm_chunk_activate': relo #5: <byte_off> [187] struct task_struct.tgid (0:79 @ offset 1404)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #5: matching candidate #0 <byte_off> [115] struct task_struct.tgid (0:94 @ offset 2772)
+libbpf: prog 'uvm_pmm_chunk_activate': relo #5: patched insn #49 (ALU/ALU64) imm 1404 -> 2772
+libbpf: sec 'struct_ops/uvm_pmm_chunk_used': found 6 CO-RE relocations
+libbpf: prog 'uvm_pmm_chunk_used': relo #0: <byte_off> [38] typedef uvm_gpu_chunk_t.va_block (0:3 @ offset 32)
+libbpf: prog 'uvm_pmm_chunk_used': relo #0: matching candidate #0 <byte_off> [147854] typedef uvm_gpu_chunk_t.va_block (0:3 @ offset 32)
+libbpf: prog 'uvm_pmm_chunk_used': relo #0: patched insn #5 (ALU/ALU64) imm 32 -> 32
+libbpf: prog 'uvm_pmm_chunk_used': relo #1: <byte_off> [45] typedef uvm_va_block_t.managed_range (0:2 @ offset 40)
+libbpf: prog 'uvm_pmm_chunk_used': relo #1: matching candidate #0 <byte_off> [147900] typedef uvm_va_block_t.managed_range (0:2 @ offset 40)
+libbpf: prog 'uvm_pmm_chunk_used': relo #1: patched insn #14 (ALU/ALU64) imm 40 -> 40
+libbpf: prog 'uvm_pmm_chunk_used': relo #2: <byte_off> [52] typedef uvm_va_range_managed_t.va_range.va_space (0:0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_chunk_used': relo #2: matching candidate #0 <byte_off> [147894] typedef uvm_va_range_managed_t.va_range.va_space (0:0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_chunk_used': relo #2: patched insn #22 (ALU/ALU64) imm 0 -> 0
+libbpf: prog 'uvm_pmm_chunk_used': relo #3: <byte_off> [63] typedef uvm_va_space_t.va_space_mm.mm (0:1:0 @ offset 26688)
+libbpf: prog 'uvm_pmm_chunk_used': relo #3: matching candidate #0 <byte_off> [147902] typedef uvm_va_space_t.va_space_mm.mm (0:43:0 @ offset 367864)
+libbpf: prog 'uvm_pmm_chunk_used': relo #3: patched insn #30 (ALU/ALU64) imm 26688 -> 367864
+libbpf: prog 'uvm_pmm_chunk_used': relo #4: <byte_off> [69] struct mm_struct.owner (0:0:43 @ offset 1496)
+libbpf: prog 'uvm_pmm_chunk_used': relo #4: matching candidate #0 <byte_off> [276] struct mm_struct.owner (0:0:51 @ offset 1176)
+libbpf: prog 'uvm_pmm_chunk_used': relo #4: patched insn #38 (ALU/ALU64) imm 1496 -> 1176
+libbpf: prog 'uvm_pmm_chunk_used': relo #5: <byte_off> [187] struct task_struct.tgid (0:79 @ offset 1404)
+libbpf: prog 'uvm_pmm_chunk_used': relo #5: matching candidate #0 <byte_off> [115] struct task_struct.tgid (0:94 @ offset 2772)
+libbpf: prog 'uvm_pmm_chunk_used': relo #5: patched insn #46 (ALU/ALU64) imm 1404 -> 2772
+libbpf: sec 'struct_ops/uvm_pmm_eviction_prepare': found 1 CO-RE relocations
+libbpf: CO-RE relocating [42] struct list_head: found target candidate [96] struct list_head in [vmlinux]
+libbpf: prog 'uvm_pmm_eviction_prepare': relo #0: <byte_off> [42] struct list_head.next (0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_eviction_prepare': relo #0: matching candidate #0 <byte_off> [96] struct list_head.next (0:0 @ offset 0)
+libbpf: prog 'uvm_pmm_eviction_prepare': relo #0: patched insn #2 (ALU/ALU64) imm 0 -> 0
+libbpf: map 'config': created successfully, fd=3
+libbpf: map 'pid_chunk_count': created successfully, fd=4
+libbpf: map 'active_chunks': created successfully, fd=5
+libbpf: map 'chunk_access_count': created successfully, fd=6
+libbpf: map 'gpu_state_map': created successfully, fd=7
+libbpf: map 'uvm_ops_lfu_xcoord': created successfully, fd=8
+Checking for old struct_ops instances...
+No old struct_ops instances found.
+Pinned gpu_state_map at /sys/fs/bpf/xcoord_gpu_state
+xCoord GPU-side loaded!
+  Eviction policy: LFU with frequency decay
+  Shared map: /sys/fs/bpf/xcoord_gpu_state
+  High priority PID: 2300571 (decay: 1)
+  Low priority PID:  0 (decay: 10)
+  Default decay:     5
+
+Press Ctrl-C to exit...
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+
+=== Per-PID Chunk Statistics ===
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+
+=== Per-PID Chunk Statistics ===
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+
+=== Per-PID Chunk Statistics ===
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+
+=== Per-PID Chunk Statistics ===
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2279         2111            0        13830        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=8303 activate=8303 used=13830 allow=13830 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2408         2020         4360        33230        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15559 activate=19919 used=33230 allow=33230 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571           138          563         7887        39312         no
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15699 activate=23586 used=39312 allow=39312 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2343          574        19679        59425        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=35434 used=59425 allow=59425 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2262          582        30874        78129        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=46629 used=78129 allow=78129 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2055          504        41971        97154        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=57726 used=97154 allow=97154 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2430          620        53664       117005        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=69419 used=117005 allow=117005 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2262          583        65259       136500        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=81014 used=136500 allow=136500 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2333          538        76652       155835        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=92407 used=155835 allow=155835 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2420          562        88420       175800        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=104175 used=175800 allow=175800 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2271          556       100242       195960        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=115997 used=195960 allow=195960 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2299          570       112388       216426        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=128143 used=216426 allow=216426 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2515          588       124322       236453        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=140077 used=236453 allow=236453 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2369          550       136331       256783        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=152085 used=256783 allow=256783 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2442          578       148313       277431        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=164068 used=277431 allow=277431 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2324          511       159914       297007        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=175669 used=297007 allow=297007 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2416          545       171477       317010        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=187232 used=317010 allow=317010 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2176          257       185620       368407        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=201375 used=368407 allow=368407 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2142          456       196572       386533        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=212327 used=386533 allow=386533 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2366          566       208414       406668        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=224169 used=406668 allow=406668 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2413          516       220342       427118        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=236097 used=427118 allow=427118 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4175          507       233839       461593        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=249594 used=461593 allow=461593 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          1907          365       244681       479843         no
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=260436 used=479843 allow=479843 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          5037         1072       261939       587258        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=277695 used=587258 allow=587258 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2297          408       277387       647774        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=293142 used=647774 allow=647774 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2943          460       291681       694284        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=307436 used=694284 allow=694284 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2318          392       303040       713636        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=318794 used=713636 allow=713636 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2292          484       314451       733232        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=330206 used=733232 allow=733232 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2102          451       325725       752077        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=341480 used=752077 allow=752077 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2470          433       337249       772075        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=353004 used=772075 allow=772075 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2363          431       349043       792273        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=364798 used=792273 allow=792273 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2411          435       360751       812178        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=376505 used=812178 allow=812178 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2232          427       372026       831232        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=387781 used=831232 allow=831232 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2315          424       383372       850125        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=399126 used=850125 allow=850125 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2250          376       394713       869563        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=410468 used=869563 allow=869563 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2293          374       406290       888802        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=422045 used=888802 allow=888802 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4864          815       421675       968167        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=437431 used=968167 allow=968167 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          5188          848       446418      1173838        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=462173 used=1173838 allow=1173838 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          5161          790       468191      1328101        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=483947 used=1328101 allow=1328101 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4957          759       488448      1465038        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=504203 used=1465038 allow=1465038 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2118          317       504760      1537028        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=520515 used=1537028 allow=1537028 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2318          341       518840      1580476        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=534595 used=1580476 allow=1580476 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2364          338       530431      1600382        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=546186 used=1600382 allow=1600382 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2399          338       541668      1619233        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=557423 used=1619233 allow=1619233 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2374          287       553219      1638441        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=568974 used=1638441 allow=1638441 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2224          297       564815      1658371        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=580570 used=1658371 allow=1658371 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2420          293       576570      1678346        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=592325 used=1678346 allow=1678346 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4791          686       596901      1808046        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=612656 used=1808046 allow=1808046 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2209          301       608509      1827366        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=624264 used=1827366 allow=1827366 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4544          557       627340      1959508        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=643096 used=1959508 allow=1959508 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2519          285       649689      2116629        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=665444 used=2116629 allow=2116629 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2249          270       661316      2136453        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=677071 used=2136453 allow=2136453 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2238          289       672919      2156158        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=688674 used=2156158 allow=2156158 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2275          297       684347      2175373        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=700102 used=2175373 allow=2175373 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2274          269       696034      2195068        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=711789 used=2195068 allow=2195068 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2403          359       707738      2214865        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=723493 used=2214865 allow=2214865 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2301          296       719503      2234885        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=735258 used=2234885 allow=2234885 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2299          281       733061      2269277        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=748816 used=2269277 allow=2269277 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2343          275       746609      2304896        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=762364 used=2304896 allow=2304896 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2423          253       758607      2325077        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=774362 used=2325077 allow=2325077 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2509          257       770254      2345011        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=786009 used=2345011 allow=2345011 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2280          235       781885      2365351        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=797640 used=2365351 allow=2365351 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2391          241       793705      2385387        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=809460 used=2385387 allow=2385387 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2258          251       805539      2405335        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=821294 used=2405335 allow=2405335 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4629          218       824027      2543394        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=839783 used=2543395 allow=2543395 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2619           80       846167      2706659        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=861922 used=2706659 allow=2706659 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          5014          154       870453      2907368        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=886209 used=2907368 allow=2907368 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2412           67       889837      3022830        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15754 activate=905592 used=3022830 allow=3022830 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2362           65       901357      3042552        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=917112 used=3042552 allow=3042552 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2120           53       912883      3062511        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=928638 used=3062511 allow=3062511 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2315           50       926423      3101620        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=942178 used=3101620 allow=3101620 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2131           34       936880      3119226        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=952635 used=3119226 allow=3119226 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2178           38       947997      3137802        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=963752 used=3137802 allow=3137802 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2219           10       961067      3173399        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=976822 used=3173399 allow=3173399 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2371           12       972227      3192318        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=987982 used=3192318 allow=3192318 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2228            0       983154      3210540        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=998909 used=3210540 allow=3210540 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2388         2178       994360      3229051        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=1010115 used=3229051 allow=3229051 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4954         5051      1015426      3393488        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=1031182 used=3393488 allow=3393488 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2335         2347      1033649      3504341        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=1049404 used=3504341 allow=3504341 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          4248         4667      1054366      3653198        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15756 activate=1070122 used=3653199 allow=3653199 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571          2342         2206      1066340      3673615        YES
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=1082095 used=3673615 allow=3673615 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571           831          398      1073109      3685077         no
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=1088864 used=3685077 allow=3685077 deny=0
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571           280          130      1073599      3685945         no
+
+=== Per-PID Chunk Statistics ===
+  HIGH PID 2300571: chunks=15755 activate=1089354 used=3685945 allow=3685945 deny=0
+
+Detaching...
+
+=== xCoord GPU State (shared with sched_ext) ===
+  PID        fault_rate    fault_cnt    evict_cnt     used_cnt  thrashing
+  2300571           280          130      1073599      3685945         no
+Unpinned /sys/fs/bpf/xcoord_gpu_state

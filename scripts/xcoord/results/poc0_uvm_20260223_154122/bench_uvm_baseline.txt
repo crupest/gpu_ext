@@ -1,0 +1,36 @@
+INFO 02-23 15:44:28 [__init__.py:216] Automatically detected platform cuda.
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7f99451d52d0>, seed=0, num_prompts=20, dataset_name='sharegpt', no_stream=False, dataset_path='/home/yunwei37/workspace/gpu/gpu_ext/workloads/llama.cpp/datasets/sharegpt_vicuna.json', no_oversample=False, custom_output_len=256, custom_skip_chat_template=False, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 0}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='openai', endpoint_type=None, base_url='http://127.0.0.1:8013', host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=1, model='gpt-oss-120b-mxfp4', tokenizer='Qwen/Qwen3-30B-A3B-FP8', use_beam_search=False, logprobs=None, request_rate=0.2, burstiness=1.0, trust_remote_code=False, disable_tqdm=False, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics='ttft,tpot,itl', metric_percentiles='99', goodput=None, request_id_prefix='benchmark-serving', top_p=None, top_k=None, min_p=None, temperature=None, tokenizer_mode='auto', served_model_name=None, lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=600)
+Starting initial single prompt test run...
+Waiting for endpoint to become up in 600 seconds
+ |          | 00:00 elapsed, ? remaining |          | 00:00 elapsed, 00:02 remaining |          | 00:09 elapsed, 1012:08:19 remaining
+Initial test run completed. Starting main benchmark run...
+Traffic request rate: 0.2
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 1
+  0%|          | 0/20 [00:00<?, ?it/s]  5%|▌         | 1/20 [00:12<03:51, 12.16s/it] 10%|█         | 2/20 [01:11<12:03, 40.20s/it] 15%|█▌        | 3/20 [01:33<08:54, 31.46s/it] 20%|██        | 4/20 [01:34<05:15, 19.71s/it]100%|██████████| 20/20 [01:40<00:00,  2.26s/it]100%|██████████| 20/20 [01:40<00:00,  5.00s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     3         
+Maximum request concurrency:             1         
+Request rate configured (RPS):           0.20      
+Benchmark duration (s):                  100.00    
+Total input tokens:                      62        
+Total generated tokens:                  1124      
+Request throughput (req/s):              0.03      
+Output token throughput (tok/s):         11.24     
+Peak output token throughput (tok/s):    32.00     
+Peak concurrent requests:                2.00      
+Total Token throughput (tok/s):          11.86     
+---------------Time to First Token----------------
+Mean TTFT (ms):                          521.85    
+Median TTFT (ms):                        305.36    
+P99 TTFT (ms):                           1127.83   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          79.32     
+Median TPOT (ms):                        76.80     
+P99 TPOT (ms):                           86.05     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           78.55     
+Median ITL (ms):                         70.89     
+P99 ITL (ms):                            198.47    
+==================================================

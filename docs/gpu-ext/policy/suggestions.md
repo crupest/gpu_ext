@@ -54,3 +54,54 @@
    * 真正没有局部性的场景：尽量保持简单（LRU/FIFO），更多是 sanity check，保证你的 policy 不把它搞得更糟。
 
 如果你愿意，我可以帮你把这些策略直接翻译成 gBPF 的伪代码 skeleton：对应到 `region_add/region_access/region_remove/prefetch` 四个 hook + `gdev_mem_prefetch_hint/gdev_mem_pin_hint` 两个 helper，各给一个最小可运行的 eBPF 例子。
+
+---
+
+## 4. Prefetch 策略详解（按 BPF 实现文件）
+
+### 4.1 Prefetch Stride 策略
+
+**文件**：`extension/prefetch_stride.bpf.c`
+
+**原理**：
+- 检测内存访问的固定步长（stride）
+- 根据历史步长预测下一个访问地址，提前预取
+- 适用于规律的数组/矩阵遍历
+
+**适用场景**：
+- 矩阵运算（固定行/列步长）
+- 数组 for 循环遍历
+- FAISS IVF 索引扫描（posting list 顺序访问）
+
+**工作方式**：
+```
+访问序列：0x1000, 0x2000, 0x3000
+检测到 stride = 0x1000
+预取：0x4000, 0x5000（向前看 N 步）
+```
+
+**与 Adaptive Sequential 的区别**：Stride 检测固定间隔，Adaptive Sequential 检测连续地址。
+
+---
+
+### 4.2 Prefetch Trace 策略
+
+**文件**：`extension/prefetch_trace.bpf.c`
+
+**原理**：
+- 记录历史访问序列（trace）到 BPF map
+- 检测重复的访问模式（pattern matching）
+- 当匹配到已知模式的前缀时，预取后续地址
+
+**适用场景**：
+- 重复执行的循环（每轮 epoch 访问相同数据块）
+- 周期性的数据访问模式
+- 固定遍历路径的图算法（如 PageRank 多轮迭代）
+
+**工作方式**：
+```
+第 1 轮: 访问 A → B → C → D（记录 trace）
+第 2 轮: 看到 A → B，预取 C 和 D
+```
+
+**与其他策略的区别**：Trace 是唯一基于"历史记忆"的策略，能处理非线性但可重复的访问模式。

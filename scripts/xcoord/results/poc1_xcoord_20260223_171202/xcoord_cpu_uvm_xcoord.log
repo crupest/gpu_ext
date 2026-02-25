@@ -1,0 +1,29 @@
+Connected to gpu_ext shared map at /sys/fs/bpf/xcoord_gpu_state
+Successfully connected gpu_state_map to gpu_ext
+xCoord GPU-aware scheduler loaded!
+  Fault rate boost threshold: 1000 faults/sec
+  GPU state map: connected
+
+Press Ctrl-C to exit (will fallback to CFS)...
+
+local=6 global=0 gpu_boosted=0 gpu_throttled=0
+local=5194 global=83 gpu_boosted=0 gpu_throttled=0
+local=12210 global=396 gpu_boosted=0 gpu_throttled=0
+local=12210 global=3664 gpu_boosted=0 gpu_throttled=0
+local=12210 global=7864 gpu_boosted=0 gpu_throttled=0
+local=12210 global=13835 gpu_boosted=0 gpu_throttled=0
+local=12210 global=18012 gpu_boosted=0 gpu_throttled=0
+local=12210 global=24851 gpu_boosted=0 gpu_throttled=0
+local=12210 global=30348 gpu_boosted=0 gpu_throttled=0
+local=12210 global=36492 gpu_boosted=0 gpu_throttled=0
+local=12210 global=42385 gpu_boosted=0 gpu_throttled=0
+local=12210 global=47563 gpu_boosted=0 gpu_throttled=0
+local=12210 global=53996 gpu_boosted=0 gpu_throttled=0
+local=12210 global=58493 gpu_boosted=0 gpu_throttled=0
+local=12210 global=65025 gpu_boosted=0 gpu_throttled=0
+local=12210 global=69661 gpu_boosted=0 gpu_throttled=0
+local=12210 global=74870 gpu_boosted=0 gpu_throttled=0
+local=12210 global=79583 gpu_boosted=0 gpu_throttled=0
+local=12210 global=83588 gpu_boosted=0 gpu_throttled=0
+local=12210 global=90240 gpu_boosted=0 gpu_throttled=0
+local=12210 global=96722 gpu_boosted=0 gpu_throttled=0

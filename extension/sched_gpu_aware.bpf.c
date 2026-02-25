@@ -1,0 +1,180 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * xCoord CPU-side: GPU-Aware sched_ext Scheduler
+ *
+ * A simple sched_ext scheduler that reads GPU state from the shared
+ * gpu_state_map and uvm_worker_pids map (written by eviction_lfu_xcoord)
+ * to boost CPU scheduling priority for kernel threads actively handling
+ * UVM page faults.
+ *
+ * Based on scx_simple from Linux kernel tools/sched_ext/.
+ * Simplified to avoid UEI (32-bit atomics not supported by clang 18).
+ */
+#include <scx/common.bpf.h>
+#include "shared_maps.h"
+
+char _license[] SEC("license") = "GPL";
+
+/*
+ * Shared GPU state map -- will be replaced with the pinned map from
+ * gpu_ext via bpf_map__reuse_fd() in the userspace loader.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, XCOORD_MAX_PIDS);
+	__type(key, __u32);
+	__type(value, struct gpu_pid_state);
+} gpu_state_map SEC(".maps");
+
+/*
+ * UVM worker thread tracking -- replaced with the pinned map from
+ * gpu_ext. Maps kernel worker thread PIDs to their last UVM activity
+ * timestamp. Used to identify which threads to boost.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, XCOORD_MAX_WORKERS);
+	__type(key, __u32);
+	__type(value, __u64);
+} uvm_worker_pids SEC(".maps");
+
+/* Per-CPU statistics: [local, global, gpu_boosted, gpu_throttled] */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+	__uint(max_entries, 4);
+} stats SEC(".maps");
+
+enum stat_idx {
+	STAT_LOCAL = 0,
+	STAT_GLOBAL = 1,
+	STAT_GPU_BOOSTED = 2,
+	STAT_GPU_THROTTLED = 3,
+};
+
+static u64 vtime_now;
+
+/* Exit state (simplified, no UEI to avoid clang 18 atomic issues) */
+volatile int exit_kind;
+
+#define SHARED_DSQ 0
+
+/* Configurable via rodata */
+const volatile u64 fault_rate_boost_threshold = XCOORD_FAULT_RATE_HIGH;
+const volatile u64 slice_boost_ns = 40000000ULL; /* 40ms (2x default 20ms) */
+
+static void stat_inc(u32 idx)
+{
+	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx);
+	if (cnt_p)
+		(*cnt_p)++;
+}
+
+s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
+		   s32 prev_cpu, u64 wake_flags)
+{
+	bool is_idle = false;
+	s32 cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
+		stat_inc(STAT_LOCAL);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+	}
+
+	return cpu;
+}
+
+void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	u32 pid = p->tgid;
+	u64 slice = SCX_SLICE_DFL;
+	u64 vtime;
+	u64 *worker_ts;
+	u64 now;
+
+	/*
+	 * Check if this task is an active UVM worker thread.
+	 * UVM page fault handlers run in kworker threads, not in the
+	 * user process itself. The gpu_ext side tracks which kernel
+	 * threads are actively doing UVM operations.
+	 */
+	worker_ts = bpf_map_lookup_elem(&uvm_worker_pids, &pid);
+	if (worker_ts) {
+		now = bpf_ktime_get_ns();
+		if (now - *worker_ts < XCOORD_WORKER_TIMEOUT_NS) {
+			/*
+			 * Active UVM worker: boost to head of queue
+			 * so page fault handling completes quickly.
+			 */
+			stat_inc(STAT_GPU_BOOSTED);
+			scx_bpf_dsq_insert(p, SHARED_DSQ, slice_boost_ns,
+					    enq_flags | SCX_ENQ_HEAD);
+			return;
+		}
+	}
+
+	/*
+	 * Also check if this is the GPU process itself (for GPU-side
+	 * thrashing detection — give longer slices to reduce context
+	 * switch overhead).
+	 */
+	struct gpu_pid_state *gpu = bpf_map_lookup_elem(&gpu_state_map, &pid);
+	if (gpu && gpu->is_thrashing) {
+		stat_inc(STAT_GPU_THROTTLED);
+		slice = slice_boost_ns;
+	}
+
+	/* Default: weighted vtime scheduling */
+	stat_inc(STAT_GLOBAL);
+
+	vtime = p->scx.dsq_vtime;
+	if (time_before(vtime, vtime_now - SCX_SLICE_DFL))
+		vtime = vtime_now - SCX_SLICE_DFL;
+
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+}
+
+void BPF_STRUCT_OPS(gpu_aware_dispatch, s32 cpu, struct task_struct *prev)
+{
+	scx_bpf_dsq_move_to_local(SHARED_DSQ);
+}
+
+void BPF_STRUCT_OPS(gpu_aware_running, struct task_struct *p)
+{
+	if (time_before(vtime_now, p->scx.dsq_vtime))
+		vtime_now = p->scx.dsq_vtime;
+}
+
+void BPF_STRUCT_OPS(gpu_aware_stopping, struct task_struct *p, bool runnable)
+{
+	p->scx.dsq_vtime += (SCX_SLICE_DFL - p->scx.slice) * 100 / p->scx.weight;
+}
+
+void BPF_STRUCT_OPS(gpu_aware_enable, struct task_struct *p)
+{
+	p->scx.dsq_vtime = vtime_now;
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(gpu_aware_init)
+{
+	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+}
+
+void BPF_STRUCT_OPS(gpu_aware_exit, struct scx_exit_info *ei)
+{
+	/* Simple exit recording without UEI (avoids 32-bit atomic issue) */
+	exit_kind = 1;
+}
+
+SCX_OPS_DEFINE(gpu_aware_ops,
+	       .select_cpu	= (void *)gpu_aware_select_cpu,
+	       .enqueue		= (void *)gpu_aware_enqueue,
+	       .dispatch	= (void *)gpu_aware_dispatch,
+	       .running		= (void *)gpu_aware_running,
+	       .stopping	= (void *)gpu_aware_stopping,
+	       .enable		= (void *)gpu_aware_enable,
+	       .init		= (void *)gpu_aware_init,
+	       .exit		= (void *)gpu_aware_exit,
+	       .name		= "gpu_aware");

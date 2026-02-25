@@ -21,9 +21,15 @@ INCLUDES := -I$(OUTPUT) -I../libbpf/include/uapi -I$(dir $(VMLINUX)) -I/usr/loca
 CFLAGS := -g -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
 
-BPF_APPS = struct_ops prefetch_always_max prefetch_none prefetch_adaptive_tree_iter prefetch_adaptive_sequential prefetch_pid_tree prefetch_eviction_pid prefetch_stride eviction_fifo eviction_lfu eviction_mru eviction_pid_quota eviction_freq_pid_decay eviction_fifo_chance chunk_trace prefetch_trace gpu_sched_trace gpu_preempt_ctrl gpu_sched_set_timeslices # BPF apps that need skeletons
+# sched_ext (scx) headers for GPU-aware scheduler
+SCX_INCLUDE_DIR := $(HOME)/workspace/gpu/linux/tools/sched_ext/include
+SCX_VMLINUX := ../vmlinux/$(ARCH)/scx/vmlinux.h
+SCX_INCLUDES := -I$(SCX_INCLUDE_DIR) -I$(dir $(SCX_VMLINUX))
+
+BPF_APPS = struct_ops prefetch_always_max prefetch_none prefetch_adaptive_tree_iter prefetch_adaptive_sequential prefetch_pid_tree prefetch_eviction_pid prefetch_stride eviction_fifo eviction_lfu eviction_mru eviction_pid_quota eviction_freq_pid_decay eviction_fifo_chance chunk_trace prefetch_trace gpu_sched_trace gpu_preempt_ctrl gpu_sched_set_timeslices eviction_lfu_xcoord # BPF apps that need skeletons
+SCX_APPS = sched_gpu_aware # sched_ext apps (need scx headers)
 TOOL_APPS = cleanup_struct_ops_tool # Pure userspace tools
-APPS = $(BPF_APPS) $(TOOL_APPS) # minimal minimal_legacy uprobe kprobe fentry usdt sockfilter tc ksyscall
+APPS = $(BPF_APPS) $(SCX_APPS) $(TOOL_APPS) # minimal minimal_legacy uprobe kprobe fentry usdt sockfilter tc ksyscall
 
 CARGO ?= $(shell which cargo)
 ifeq ($(strip $(CARGO)),)
@@ -104,11 +110,21 @@ $(LIBBLAZESYM_HEADER): $(LIBBLAZESYM_SRC)/target/release/libblazesym.a | $(OUTPU
 	$(call msg,LIB,$@)
 	$(Q)cp $(LIBBLAZESYM_SRC)/target/release/blazesym.h $@
 
-# Build BPF code
+# Build BPF code (standard)
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(wildcard %.h) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
 		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES)		      \
+		     -c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
+	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
+
+# Build BPF code (sched_ext apps - use scx vmlinux.h + scx headers)
+$(patsubst %,$(OUTPUT)/%.bpf.o,$(SCX_APPS)): $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(wildcard %.h) $(SCX_VMLINUX) | $(OUTPUT) $(BPFTOOL)
+	$(call msg,SCX-BPF,$@)
+	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
+		     -I$(OUTPUT) -I../libbpf/include/uapi			      \
+		     $(SCX_INCLUDES)						      \
+		     $(CLANG_BPF_SYS_INCLUDES)				      \
 		     -c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 
@@ -119,11 +135,17 @@ $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT) $(BPFTOOL)
 
 # Build user-space code - BPF apps need skeletons
 $(patsubst %,$(OUTPUT)/%.o,$(BPF_APPS)): %.o: %.skel.h
+$(patsubst %,$(OUTPUT)/%.o,$(SCX_APPS)): %.o: %.skel.h
 
 # Tool apps don't need skeletons
 $(patsubst %,$(OUTPUT)/%.o,$(TOOL_APPS)): $(OUTPUT)/%.o: %.c cleanup_struct_ops.h | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
+
+# SCX apps need scx headers for userspace compilation
+$(patsubst %,$(OUTPUT)/%.o,$(SCX_APPS)): $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
+	$(call msg,SCX-CC,$@)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) $(SCX_INCLUDES) -c $(filter %.c,$^) -o $@
 
 $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,CC,$@)
