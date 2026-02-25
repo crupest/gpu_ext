@@ -302,8 +302,10 @@ eunomia-bpf community
 <div class="border-l-4 border-orange-500 pl-3">
 
 **Device Profilers** (NVBit, Neutrino, CUPTI)
-- Design for Read-only
+- Read-only: cannot modify behavior or inject logic
 - High overhead
+- No per-thread visibility (CUPTI), or no cross-layer (NVBit)
+- Cannot dynamically attach without restart
 
 </div>
 
@@ -498,10 +500,10 @@ Need to extend eBPF to GPU device contexts
 
 **Running eBPF on GPU Device (bpftime)**
 
-- Compile eBPF to PTX/SPIR-V
-- Device-side hooks and helpers
-- Inject into GPU kernels via dynamic instrumentation
-- Cross-layer eBPF Maps
+- Fine-grained profiling: per-thread/warp/SM observability
+- Compile eBPF to PTX/SPIR-V with Device-side hooks and helpers
+- Dynamic instrumentation (no recompile, no restart)
+- Cross-layer eBPF Maps (CPU ↔ GPU)
 
 </div>
 
@@ -663,6 +665,77 @@ CUPTI shows kernel "started" quickly, but it's slow. Why?
 
 ---
 
+# More Tools: threadhist & kernelretsnoop
+
+<div class="grid grid-cols-2 gap-4">
+
+<div>
+
+### threadhist — Per-Thread Count
+
+<div class="text-xs">
+
+```c
+// 89 LOC total — Per-thread isolated counter
+struct {
+    __uint(type, BPF_MAP_TYPE_PERGPUTD_ARRAY_MAP);
+    __uint(max_entries, 1);
+    __type(key, u32); __type(value, u64);
+} call_count SEC(".maps");
+
+SEC("kretprobe/_Z9vectorAddPKfS0_Pf")
+int cuda__retprobe() {
+    u32 key = 0;
+    u64 *cnt = bpf_map_lookup_elem(&call_count, &key);
+    if (cnt) *cnt += 1;
+    return 0;
+}
+```
+
+</div>
+
+- **PERGPUTD_ARRAY**: each GPU thread gets isolated storage
+- Diagnose: grid-stride loop bugs, idle threads
+- Thread 4: 158K vs Thread 0-3: 210K → boundary bug
+
+</div>
+
+<div>
+
+### kernelretsnoop — Exit Timestamps
+
+<div class="text-xs">
+
+```c
+// 153 LOC total — Stream per-thread events to host
+struct data { u64 x, y, z; u64 timestamp; };
+struct {
+    __uint(type, BPF_MAP_TYPE_GPU_RINGBUF_MAP);
+    __uint(max_entries, 16);
+} rb SEC(".maps");
+
+SEC("kretprobe/_Z9vectorAddPKfS0_Pf")
+int cuda__retprobe() {
+    struct data d;
+    bpf_get_thread_idx(&d.x, &d.y, &d.z);
+    d.timestamp = bpf_get_globaltimer();
+    bpf_perf_event_output(NULL, &rb, 0, &d, sizeof(d));
+    return 0;
+}
+```
+
+</div>
+
+- **GPU_RINGBUF**: lock-free ring buffer → host
+- Diagnose: warp divergence, memory bottlenecks
+- Thread 31 finishes 750ns late → divergent branch
+
+</div>
+
+</div>
+
+---
+
 # Performance: Observability Tools Overhead
 
 Tested on a P40 GPU with llama.cpp 1B inference.
@@ -674,6 +747,30 @@ Tested on a P40 GPU with llama.cpp 1B inference.
 | launchlate | 347 | **14%** | 93% |
 
 **Key**: Warp-uniform execution achieves **3-14%** overhead vs NVBit's **85-93%**
+
+---
+
+# bpftime vs Existing GPU Profilers
+
+<div class="text-sm">
+
+| Capability | CUPTI | Nsight Compute | NVBit | **bpftime** |
+|------------|-------|----------------|-------|-------------|
+| Runtime overhead | Low | Low | 85-93% | **3-14%** |
+| Per-thread metrics | ✗ | ✗ | ✓ | **✓** |
+| Cross CPU+GPU | Partial | ✓ | ✗ | **✓** |
+| Dynamic attach | ✗ | ✗ | ✓ | **✓** |
+| Custom logic | ✗ | ✗ | ✓ | **✓** |
+| No recompile needed | ✗ | ✓ | ✓ | **✓** |
+| Can modify behavior | ✗ | ✗ | ✗ | **✓** |
+
+</div>
+
+<div class="mt-2 p-2 bg-blue-50 rounded text-sm">
+
+**bpftime** = low overhead of CUPTI + programmability of NVBit + cross-layer visibility of Nsight
+
+</div>
 
 ---
 
