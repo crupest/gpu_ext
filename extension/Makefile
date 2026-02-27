@@ -26,7 +26,7 @@ SCX_INCLUDE_DIR := $(HOME)/workspace/gpu/linux/tools/sched_ext/include
 SCX_VMLINUX := ../vmlinux/$(ARCH)/scx/vmlinux.h
 SCX_INCLUDES := -I$(SCX_INCLUDE_DIR) -I$(dir $(SCX_VMLINUX))
 
-BPF_APPS = struct_ops prefetch_always_max prefetch_none prefetch_adaptive_tree_iter prefetch_adaptive_sequential prefetch_pid_tree prefetch_eviction_pid prefetch_stride eviction_fifo eviction_lfu eviction_mru eviction_pid_quota eviction_freq_pid_decay eviction_fifo_chance eviction_cycle_moe chunk_trace prefetch_trace gpu_sched_trace gpu_preempt_ctrl gpu_sched_set_timeslices eviction_lfu_xcoord prefetch_always_max_cycle_moe prefetch_max_mru_expert prefetch_max_passive_mru prefetch_cross_block prefetch_template_belady # BPF apps that need skeletons
+BPF_APPS = struct_ops prefetch_always_max prefetch_none prefetch_adaptive_tree_iter prefetch_adaptive_sequential prefetch_pid_tree prefetch_eviction_pid prefetch_stride eviction_fifo eviction_lfu eviction_mru eviction_pid_quota eviction_freq_pid_decay eviction_fifo_chance eviction_cycle_moe chunk_trace prefetch_trace gpu_sched_trace gpu_preempt_ctrl gpu_sched_set_timeslices eviction_lfu_xcoord prefetch_always_max_cycle_moe prefetch_max_mru_expert prefetch_max_passive_mru prefetch_cross_block_v2 prefetch_template_belady # BPF apps that need skeletons
 SCX_APPS = sched_gpu_aware # sched_ext apps (need scx headers)
 TOOL_APPS = cleanup_struct_ops_tool # Pure userspace tools
 APPS = $(BPF_APPS) $(SCX_APPS) $(TOOL_APPS) # minimal minimal_legacy uprobe kprobe fentry usdt sockfilter tc ksyscall

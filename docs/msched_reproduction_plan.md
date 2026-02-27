@@ -18,6 +18,7 @@
 - `bpf_uvm_pmm_chunk_move_head()` — 将 chunk 移到 eviction list 头部（优先驱逐）
 - `bpf_uvm_pmm_chunk_move_tail()` — 将 chunk 移到 eviction list 尾部（保护）
 - `bpf_uvm_strstr()` — 字符串匹配
+- `bpf_uvm_migrate_range(va_space, addr, length)` — **sleepable**: 从 bpf_wq callback 调用，触发 VA range 迁移到 GPU
 
 **读取 chunk 信息的方式**：使用 BTF/CO-RE（`BPF_CORE_READ`）直接解引用内核结构体，无需添加新 kfunc：
 ```c
@@ -29,7 +30,25 @@ u64 chunk_va = BPF_CORE_READ(va_block, start);
 // bpf_probe_read_kernel 读取 bitfield，然后 1ULL << log2_size
 ```
 
-参考实现：`extension/test_chunk_access.bpf.c`、`extension/chunk_trace.bpf.c`
+**获取 va_block/va_space 上下文的方式**：kprobe + per-CPU map（不修改 hook 签名）：
+```c
+// kprobe 挂在 uvm_perf_prefetch_get_hint_va_block（struct_ops hook 之前调用）
+SEC("kprobe/uvm_perf_prefetch_get_hint_va_block")
+int BPF_KPROBE(capture_va_block, uvm_va_block_t *va_block) {
+    struct va_block_ctx *info = bpf_map_lookup_elem(&va_block_cache, &zero);
+    info->va_start = BPF_CORE_READ(va_block, start);
+    info->va_end = BPF_CORE_READ(va_block, end);
+    // va_space: va_block → managed_range → va_range.va_space
+    uvm_va_range_managed_t *managed = BPF_CORE_READ(va_block, managed_range);
+    info->va_space = (u64)BPF_CORE_READ(managed, va_range.va_space);
+}
+// struct_ops hook 中从同一 per-CPU map 读取
+```
+
+参考实现：
+- CO-RE 读取: `extension/test_chunk_access.bpf.c`、`extension/chunk_trace.bpf.c`
+- kprobe + per-CPU map: `extension/prefetch_trace.bpf.c`
+- bpf_wq + migrate_range: `extension/prefetch_cross_block_v2.bpf.c`
 
 ---
 

@@ -33,10 +33,8 @@ extern int bpf_uvm_strstr(const char *str, unsigned int str__sz, const char *sub
 extern void bpf_uvm_pmm_chunk_move_head(uvm_gpu_chunk_t *chunk, struct list_head *list) __weak __ksym;
 extern void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk, struct list_head *list) __weak __ksym;
 
-/* Cross-block prefetch kfuncs */
-extern u64 bpf_uvm_get_block_start_va(void) __weak __ksym;
-extern u64 bpf_uvm_get_block_end_va(void) __weak __ksym;
-extern void bpf_uvm_request_prefetch_range(u64 addr, u64 length) __weak __ksym;
+/* Cross-block prefetch kfunc (sleepable, for bpf_wq callback) */
+extern int bpf_uvm_migrate_range(u64 va_space_handle, u64 addr, u64 length) __weak __ksym;
 
 #endif
 

@@ -882,3 +882,242 @@ v1 结论仅基于 llama.cpp 120B（1.84x oversubscription），需要用 `micro
 3. **microbench + BPF**: custom module，always_max vs cross-block，各 kernel × size_factor
 4. **结果分析**: 找到 cross-block 的收益/损害临界点
 5. **更新结论**: 将 §13 的 "初步结论" 升级为完整结论
+
+---
+
+## 15. bpf_wq v2 实现与验证结果（2026-02-27）
+
+### 15.1 bpf_wq 可行性：已验证通过
+
+**关键发现**：struct_ops BPF 程序可以使用 `bpf_wq` kfunc，且 bpf_wq callback 可以调用模块注册的 `KF_SLEEPABLE` kfunc。
+
+kfunc 解析日志：
+```
+bpf_uvm_get_va_space     → nvidia_uvm [150212]
+bpf_uvm_migrate_range    → nvidia_uvm [150215]  (KF_SLEEPABLE)
+bpf_wq_init              → vmlinux [73557]
+bpf_wq_set_callback_impl → vmlinux [73559]
+bpf_wq_start             → vmlinux [73561]
+```
+
+**实现细节**：
+- 内核模块改动：删除 ring buffer/spinlock/kernel workqueue (~55 行)，新增 `bpf_uvm_get_va_space()` + `bpf_uvm_migrate_range(KF_SLEEPABLE)` (~20 行)，净减 ~35 行
+- BPF 程序：`extension/prefetch_cross_block_v2.bpf.c`，使用 `bpf_experimental.h` 中的 bpf_wq API
+- 需要从 running kernel BTF 重新生成 `vmlinux.h`（旧版本缺少 `struct bpf_wq` 定义）
+- 编译/加载/运行均无错误，dmesg 无 Xid，无 GPU fault
+
+### 15.2 Microbench 对比结果
+
+**测试环境**：custom nvidia-uvm.ko (v2 kfuncs)，RTX 5090 32GB，kernel 6.15.11
+
+#### Baseline (stock module, no BPF, threshold=51)
+
+| Kernel | size_factor | median_ms | bandwidth GB/s |
+|--------|------------|-----------|---------------|
+| seq_stream | 0.5 | 0.570 | 29534 |
+| seq_stream | 1.0 | 120.4 | 280 |
+| seq_stream | 1.5 | 1858.6 | 27 |
+| seq_stream | 2.0 | TIMEOUT | — |
+| hotspot | 0.5 | 343.0 | 490 |
+| hotspot | 1.0 | 2169 | 155 |
+| gemm | 0.5 | 1228 | 137 |
+
+#### always_max + passive MRU vs cross-block v2
+
+| Workload | size_factor | always_max (ms) | cross-block v2 (ms) | 提升 |
+|----------|-----------|-----------------|---------------------|------|
+| seq_stream | 0.5 | 0.570 | 0.572 | **0%** (fits in VRAM) |
+| **seq_stream** | **1.0** | **53.1** | **32.6** | **+63%** |
+| seq_stream | 1.5 | 2520 | 2340 | **+8%** |
+| hotspot | 0.5 | 343.0 | 342.9 | **0%** (fits in VRAM) |
+| **hotspot** | **1.0** | **1796** | **1562** | **+15%** |
+
+### 15.3 分析
+
+**cross-block prefetch 在低/中 oversubscription 有显著正收益**：
+
+1. **sf=0.5 (fits in VRAM)**: 零开销 — 数据全部在 VRAM，不触发 fault，cross-block 不触发。验证了 BPF hook 的 zero-overhead 特性。
+
+2. **sf=1.0 (刚好满)**: **显著正收益** — seq_stream +63%, hotspot +15%。
+   - 此时 VRAM 接近但不严重超额，proactive prefetch 能预先搬入即将使用的数据
+   - 对 seq_stream（线性访问）效果最好：下一个 VA block 几乎必定命中
+   - 对 hotspot（stencil 访问）也有收益：相邻 VA block 与空间局部性吻合
+
+3. **sf=1.5 (1.5x oversubscription)**: **仍有 +8% 正收益**（seq_stream）。
+   - 这与 llama.cpp 120B (1.84x) 的 -20% 负增益形成对比
+   - 原因：seq_stream 是单次遍历（不循环），prefetched block 不会被后续 fault 驱逐
+   - llama.cpp 120B 的 MoE decode 是循环遍历所有层，prefetched block 在一轮内必被驱逐
+
+4. **关键区别 — 访问模式决定 cross-block 的价值**：
+   - **单次/线性遍历** (seq_stream, hotspot stencil): cross-block 有效 — prefetch 的 block 会在驱逐前被使用
+   - **循环遍历** (MoE decode): cross-block 有害 — VRAM 满时每次 prefetch 都驱逐有用数据，且 prefetched block 在下一轮才用到
+
+### 15.4 结论更新
+
+**修正 §13 的初步结论**：cross-block prefetch 并非 "在 oversubscription 下总是有害"，而是 **取决于访问模式**：
+
+| 条件 | cross-block 效果 | 原因 |
+|------|-----------------|------|
+| fits in VRAM (sf≤0.8) | 零开销 | 不触发 fault/eviction |
+| 刚满 (sf≈1.0) | **+15~63%** | 少量 headroom + prefetch 命中率高 |
+| 中等 oversub + 线性访问 (sf=1.5) | **+8%** | prefetch block 在驱逐前被使用 |
+| 高 oversub + 循环访问 (llama.cpp 1.84x) | **-20%** | prefetch 驱逐有用 block，形成 thrashing |
+
+**bpf_wq vs 内核 workqueue**：
+- bpf_wq 完全可行，且代码量大幅减少（内核侧净减 35 行）
+- 性能表现等效（同一方案，仅执行路径不同）
+- 更符合 gpu_ext 的 "BPF 全栈" 设计哲学
+- **推荐 v2 (bpf_wq) 替代 v1 (内核 workqueue) 作为默认实现**
+
+### 15.5 llama.cpp 120B 验证
+
+cross-block v2 在 120B MoE 模型上确认负增益，与 v1 结论一致：
+
+| 配置 | pp (tok/s) | tg (tok/s) | vs always_max |
+|------|-----------|-----------|---------------|
+| always_max + passive MRU | 221.4 ± 0.4 | 87.3 ± 7.1 | — |
+| **cross-block v2 (bpf_wq)** | **214.0 ± 0.6** | **65.6 ± 7.1** | **-3% pp, -25% tg** |
+
+**结论**：bpf_wq vs 内核 workqueue 对性能无影响（v1 -22% tg vs v2 -25% tg，在 noise range 内），问题出在 "盲目 adjacent block" 策略本身。
+
+### 15.6 120B MoE Block 访问模式深度分析
+
+基于 chunk_trace_120b_raw.csv（65,719 POPULATE 事件，12,131 unique blocks）的分析（`analyze_crossblock_v2.py`）：
+
+#### Adjacent Block 命中率
+
+| Prefetch Lookahead | 命中率 |
+|-------------------|--------|
+| +1 block (当前策略) | **26.4%** |
+| +2 blocks | 31.3% |
+| +3 blocks | 34.6% |
+| +5 blocks | 39.5% |
+| +10 blocks | 50.3% |
+
+**结论**：盲目 adjacent 只能覆盖 ~26% 的 block transitions。即使 prefetch 10 个 adjacent blocks 也只覆盖 50%。MoE 模型的 block 访问高度非线性。
+
+#### Jump Distance 分布
+
+```
++1 blocks: 17131 (26.5%)   ← adjacent 命中
++2 blocks:  3167 ( 4.9%)
++3 blocks:  2117 ( 3.3%)
++5~+11:     各 1100-1700 (2-3%)
+Far jumps:  40621 (62.8%)   ← 跳到完全不同的 VA 区域
+```
+
+**62.8% 的 block transitions 是 far jump**（跨越多个 VA region），这些对应 MoE expert 之间的切换。
+
+#### History-Based Prediction
+
+| History Length | Prediction Accuracy | Unique Patterns |
+|---------------|-------------------|----------------|
+| 1 (last jump) | 27.9% | 932 |
+| 2 (last 2 jumps) | 39.5% | 12,330 |
+| **3 (last 3 jumps)** | **67.7%** | **36,254** |
+
+**关键发现**：最近 3 跳历史可达到 **67.7% 预测准确率**（vs adjacent 的 26.4%），但需要 36K patterns — 这可以用 BPF HASH map 存储，但在 fault handler 热路径查找可能太慢（之前已验证 HASH map 在热路径会导致 Xid 31）。
+
+#### Consecutive Adjacent Run 长度
+
+```
+Mean: 1.3 blocks
+78% of runs: length 1 (single adjacent step, then far jump)
+Max: 22 blocks
+```
+
+Adjacent 步序非常短 — 大部分只走 1 步就跳到远处。这解释了为什么 cross-block prefetch 的 26% 命中率不能补偿 74% 的浪费。
+
+#### VA Region 碎片化
+
+- 12,113 unique blocks 分布在 **2,917 个 contiguous VA regions**
+- 平均 region 大小: ~4 blocks (8 MB)
+- 这意味着模型权重在 VA 空间中高度碎片化，不适合 adjacent prefetch
+
+### 15.7 潜在改进方向
+
+基于分析，以下策略可能比盲目 adjacent 更有效：
+
+1. **History-3 prediction**（67.7% accuracy）
+   - 记录最近 3 次 block jump → 预测下一跳
+   - 挑战：36K patterns 需要 BPF HASH map，热路径查找可能太慢
+   - 可能方案：PERCPU_ARRAY 做 hash table（固定大小），接受 collision
+
+2. **Layer-aware prefetch**（基于 VA→layer mapping）
+   - 从当前 layer 推断下一层，prefetch 对应 VA region
+   - 需要 layer_va_ranges.json 的 36 条映射
+   - 与 template_belady eviction 共享 infrastructure
+
+3. **Selective cross-block**
+   - 只在检测到 consecutive adjacent run 时 prefetch（连续 2+ 次 adjacent 才激活）
+   - 避免 far jump 后的无效 prefetch
+
+---
+
+## 16. 代码清理 (2026-02-27)
+
+### 16.1 原则：不修改内核模块获取上下文信息
+
+**核心发现**: va_block、va_space 等上下文信息不需要通过添加 kfunc 或修改 hook 签名获取。
+BPF 程序可以通过 **kprobe + per-CPU map** 模式，在调用链上游函数中捕获这些信息。
+
+**已有示例**: `extension/prefetch_trace.bpf.c`
+- kprobe 挂在 `uvm_perf_prefetch_get_hint_va_block`（在 struct_ops hook 之前调用）
+- 从函数参数拿到 `va_block`，用 CO-RE 读取 `start`/`end`/`va_space`
+- 写入 `BPF_MAP_TYPE_PERCPU_ARRAY`（同 CPU 上 struct_ops hook 会读到）
+
+```
+调用链: uvm_perf_prefetch_get_hint_va_block(va_block, ...)
+          ↓
+        compute_prefetch_mask(va_block, ...)
+          ↓
+        compute_prefetch_region(va_block, ...)
+          ↓
+        uvm_bpf_call_before_compute_prefetch(...)
+          ↓
+        ops->uvm_prefetch_before_compute(...)  ← BPF struct_ops hook
+```
+
+**kprobe 在上游捕获 va_block → per-CPU map → struct_ops hook 读取**
+
+CO-RE 读取链:
+- `BPF_CORE_READ(va_block, start)` → block start VA
+- `BPF_CORE_READ(va_block, end)` → block end VA
+- `BPF_CORE_READ(va_block, managed_range, va_range.va_space)` → va_space 指针
+
+### 16.2 清理结果
+
+**移除的内核代码** (从 `uvm_bpf_struct_ops.c`):
+- ~~`struct uvm_bpf_prefetch_ctx` + `DEFINE_PER_CPU`~~ (per-CPU context)
+- ~~`bpf_uvm_get_block_start_va()`~~ → 用 kprobe + CO-RE 替代
+- ~~`bpf_uvm_get_block_end_va()`~~ → 同上
+- ~~`bpf_uvm_get_va_space()`~~ → 同上
+- ~~`bpf_uvm_request_prefetch_range()`~~ (v1 kernel workqueue) → 用 bpf_wq 替代
+- ~~kernel workqueue / ring buffer / spinlock 基础设施~~ (v1)
+- ~~hook 签名修改 (va_block 参数)~~ → 不需要，kprobe 获取
+
+**保留的内核代码** (最小化内核修改):
+- `bpf_uvm_migrate_range()` kfunc — action kfunc，调用内部 `uvm_migrate()`，无法用 CO-RE 替代
+- `uvm_migrate_bpf()` (uvm_migrate.c) — migrate_range 的后端
+
+**删除的 BPF 程序**:
+- `extension/prefetch_cross_block.bpf.c` (v1) — 依赖已删除的 kernel workqueue kfunc
+
+**更新的 BPF 程序**:
+- `extension/prefetch_cross_block_v2.bpf.c` — 改用 kprobe + per-CPU map 获取 va_block 信息
+
+**删除的一次性脚本**:
+- `microbench/memory/run_baseline.sh`, `run_compare.sh`, `run_compare_oversub.sh`, `run_llama_compare.sh`
+- `microbench/memory/results/`
+
+### 16.3 规则：未来获取上下文信息的方式
+
+**不应该做**:
+- 添加 getter kfunc 从 per-CPU context 返回内核指针
+- 修改 struct_ops hook 签名传递额外参数
+- 在内核模块中添加 per-CPU context set/clear 代码
+
+**应该做**:
+- kprobe 挂在调用链上游，从函数参数用 CO-RE 读取
+- 写入 `BPF_MAP_TYPE_PERCPU_ARRAY`，struct_ops hook 中读取
+- 参考 `extension/prefetch_trace.bpf.c` 的实现模式
