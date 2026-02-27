@@ -53,8 +53,8 @@ int main(int argc, char **argv) {
     }
 
     printf("Loaded: cross-block prefetch + always_max intra-block + passive MRU eviction\n");
-    printf("  Prefetch: intra-block always_max + %d adjacent blocks ahead (deferred)\n", 2);
-    printf("  Eviction: T1 threshold=%d → protect (move_tail), non-T1 passive MRU\n", 3);
+    printf("  Prefetch: intra-block always_max + 1 adjacent block ahead (rate-limited)\n");
+    printf("  Eviction: T1 threshold=%d -> protect (move_tail), non-T1 passive MRU\n", 3);
     printf("Press Ctrl-C to exit...\n");
 
     while (!exiting) {

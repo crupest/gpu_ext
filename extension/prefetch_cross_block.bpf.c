@@ -26,14 +26,22 @@ char _license[] SEC("license") = "GPL";
 #define COUNTER_SLOTS 16384
 #define COUNTER_MASK (COUNTER_SLOTS - 1)
 
-/* Number of adjacent 2MB VA blocks to prefetch ahead */
-#define PREFETCH_AHEAD_BLOCKS 2
 /* VA block size = 2MB */
 #define VA_BLOCK_SIZE (2ULL * 1024 * 1024)
 
 extern u64 bpf_uvm_get_block_start_va(void) __ksym __weak;
 extern u64 bpf_uvm_get_block_end_va(void) __ksym __weak;
 extern void bpf_uvm_request_prefetch_range(u64 addr, u64 length) __ksym __weak;
+
+/* Rate-limit cross-block prefetch: only issue prefetch once per new block.
+ * Tracks last block VA to avoid redundant requests on repeated faults
+ * within the same VA block. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} last_prefetch_block SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -63,17 +71,16 @@ int BPF_PROG(uvm_prefetch_before_compute,
     uvm_page_index_t max_outer = BPF_CORE_READ(max_prefetch_region, outer);
     bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
 
-    /* 2) Cross-block: request prefetch of adjacent block(s) ahead */
+    /* 2) Cross-block: prefetch 1 adjacent block ahead, rate-limited.
+     * Only prefetch when we encounter a NEW block (avoid redundant
+     * requests from multiple faults within the same 2MB block). */
     u64 block_end = bpf_uvm_get_block_end_va();
     if (block_end > 0) {
-        u64 next_addr = block_end + 1;
-        int i;
-
-        /* Request up to PREFETCH_AHEAD_BLOCKS adjacent blocks.
-         * Each request is one VA block (2MB). Bounded by loop. */
-        for (i = 0; i < PREFETCH_AHEAD_BLOCKS && i < 4; i++) {
-            bpf_uvm_request_prefetch_range(next_addr, VA_BLOCK_SIZE);
-            next_addr += VA_BLOCK_SIZE;
+        u32 zero = 0;
+        u64 *last = bpf_map_lookup_elem(&last_prefetch_block, &zero);
+        if (last && *last != block_end) {
+            *last = block_end;
+            bpf_uvm_request_prefetch_range(block_end + 1, VA_BLOCK_SIZE);
         }
     }
 

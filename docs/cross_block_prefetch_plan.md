@@ -436,7 +436,449 @@ sudo rmmod -f nvidia_uvm && sudo modprobe nvidia
 
 ## 11. 待确认风险
 
-- [ ] `bpf_wq` 是否可用于 struct_ops 程序（kernel 6.15）
-- [ ] sleepable kfunc (`KF_SLEEPABLE`) 是否可从 bpf_wq callback 调用
-- [ ] `uvm_va_space_mm_or_current_retain_lock()` 从 kworker 线程调用是否安全（current->mm 为 NULL）
-- [ ] va_space 裸指针传递的安全性（v1 接受风险，v2 加验证）
+- [ ] `bpf_wq` 是否可用于 struct_ops 程序 → **未实际尝试**，v1 跳过直接用了内核 workqueue。bpf_wq 在 kernel 6.15 可用（已确认 API 存在），需要写 v2 验证
+- [ ] bpf_wq callback 能否调用模块注册的 KF_SLEEPABLE kfunc → 待验证
+- [x] `uvm_va_space_mm_or_current_retain_lock()` → 绕过，`uvm_migrate_bpf()` 使用 `mm=NULL` + `first_managed_range`
+- [x] va_space 裸指针 → v1 benchmark 期间安全（llama-bench 不退出）
+
+---
+
+## 12. 所有测试过的算法详解
+
+本节对项目中测试过的所有 prefetch 和 eviction 算法做简要说明，方便理解后续实验结果表中各配置的含义。
+
+### 12.1 背景：UVM Demand Paging 工作流程
+
+GPU 通过 UVM（Unified Virtual Memory）访问超过显存容量的数据。当 GPU 访问不在显存中的数据时：
+
+```
+GPU 执行 kernel → 访问不在 VRAM 的页 → GPU MMU 产生 page fault
+→ 中断通知 CPU → UVM fault handler:
+    1. 选择要预取的范围 (prefetch policy)
+    2. 如果 VRAM 已满，选择要驱逐的 chunk (eviction policy)
+    3. DMA 传输：evict D2H + fault-in H2D
+→ GPU 恢复执行
+```
+
+UVM 将虚拟地址空间划分为 **2MB VA block**，每个 VA block 包含 512 个 4KB 页。Prefetch policy 决定"一次 fault 带多少数据进 VRAM"，eviction policy 决定"VRAM 满时先淘汰谁"。
+
+BPF struct_ops hook 在两个决策点介入：
+- `uvm_prefetch_before_compute`: 在 bitmap tree 遍历前调用，可 BYPASS（跳过内核算法，使用 BPF 设定的区域）、DEFAULT（走内核默认）或 ENTER_LOOP（让内核遍历但每层调 BPF）
+- `uvm_pmm_chunk_used`: 在 chunk 被使用时调用，可控制 chunk 在 eviction list 中的位置（move_head = 优先淘汰，move_tail = 保护，BYPASS 不移动 = 冻结当前位置）
+
+---
+
+### 12.2 Prefetch 算法
+
+#### Baseline（无 BPF，threshold=51）
+
+**UVM 内核默认算法**。每次 page fault 时：
+1. 在当前 2MB VA block 上构建 bitmap tree（虚拟二叉树，512 个叶子）
+2. 从 fault page 所在叶子向上遍历，每层检查：`populated_count * 100 > subregion_pages * 51`
+3. 只要子树中已有页占比超过 51%，就扩展 prefetch 范围到该子树
+4. 最终 prefetch 区域 = 满足条件的最大连续子树
+
+**对 MoE 的问题**：一个几乎空的 VA block 第一次 fault 时，populated 占比极低（1/512 = 0.2%），threshold=51% 几乎不会扩展，导致每个 VA block 需要大量 fault 才能把数据全部搬入。
+
+```c
+// 内核默认逻辑 (uvm_perf_prefetch.c)
+for (level = 0; level < tree_height; level++) {
+    if (populated * 100 > subregion_pages * threshold)
+        expand region to this subtree;
+}
+```
+
+#### always_max（BPF BYPASS，预取整个 VA block）
+
+**最简单也是收益最大的策略**。每次 fault 时，直接把 prefetch 区域设为整个 VA block 的 `max_prefetch_region`，跳过 bitmap tree 遍历。
+
+```c
+// prefetch_always_max.bpf.c
+SEC("struct_ops/uvm_prefetch_before_compute")
+int BPF_PROG(uvm_prefetch_before_compute, ...) {
+    // 取 max_prefetch_region 的 first 和 outer（整个 VA block 范围）
+    uvm_page_index_t max_first = BPF_CORE_READ(max_prefetch_region, first);
+    uvm_page_index_t max_outer = BPF_CORE_READ(max_prefetch_region, outer);
+    // 设 result = max → 预取整个 VA block 所有 non-resident 页
+    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+    return 1; // BYPASS — 跳过内核 bitmap tree 算法
+}
+```
+
+**效果**：等效于 threshold=0。一次 fault 把整个 2MB VA block 的所有页搬入 VRAM，消除同一 block 内后续的 page fault。不减少 chunk 级别的 thrashing（82% re-fault 不变），但大幅减少 page-level fault 数量（从 ~400/token 降到 ~107/token）。
+
+#### stride（步长模式预测）
+
+检测连续 fault 地址的步长模式，预测下一次 fault 位置并预取。使用置信度衰减机制：连续命中增加置信度，miss 降低置信度。
+
+```c
+// 简化逻辑
+stride = current_fault_addr - last_fault_addr;
+if (stride == predicted_stride)
+    confidence++;  // 命中
+else
+    confidence--;  // miss, 衰减
+if (confidence >= threshold)
+    prefetch_region = [current + stride, current + stride * pages];
+    return 1; // BYPASS
+```
+
+**MoE 的灾难**：MoE 模型的内存访问在层间跳跃（非线性），stride 检测极少成功（仅 8% fault 触发预取）。关键问题是 stride 策略返回 BYPASS 即使未做预取 — 这阻止了内核默认预取，等效于禁用预取。
+
+#### none（完全禁用预取）
+
+返回空 region + BYPASS，强制每个页单独 fault。用作性能下限参考。
+
+#### cross-block aggressive（跨 VA block 激进预取，每次 fault 预取 2 个相邻 block）
+
+在 always_max（intra-block 全量预取）基础上，额外通过 kernel workqueue 异步迁移当前 VA block 之后的 2 个相邻 2MB block。每次 fault 都触发。
+
+```c
+// prefetch_cross_block.bpf.c (aggressive 版本)
+SEC("struct_ops/uvm_prefetch_before_compute")
+int BPF_PROG(uvm_prefetch_before_compute, ...) {
+    // 1) Intra-block: always_max
+    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+
+    // 2) Cross-block: 预取后面 2 个 VA block
+    u64 block_end = bpf_uvm_get_block_end_va();
+    if (block_end > 0) {
+        // 请求迁移 block_end+1 开始的 4MB (2 blocks × 2MB)
+        bpf_uvm_request_prefetch_range(block_end + 1, 2 * VA_BLOCK_SIZE);
+    }
+    return 1; // BYPASS
+}
+```
+
+**内核侧实现**：`bpf_uvm_request_prefetch_range()` 将请求放入 64-slot ring buffer，workqueue worker 线程在 fault handler 外调用 `uvm_migrate_bpf()` 执行实际迁移。
+
+#### cross-block rate-limited（跨 VA block 限速预取，每个新 block 仅 1 次）
+
+相比 aggressive 版本，增加去重：用 ARRAY map 记录上次预取的 block VA，只在进入**新** VA block 时才预取 1 个相邻 block。同一 block 内的后续 fault 不触发额外预取。
+
+```c
+// prefetch_cross_block.bpf.c (rate-limited 版本)
+u64 block_end = bpf_uvm_get_block_end_va();
+if (block_end > 0) {
+    u32 zero = 0;
+    u64 *last = bpf_map_lookup_elem(&last_prefetch_block, &zero);
+    if (last && *last != block_end) {
+        *last = block_end;  // 记录已预取此 block
+        bpf_uvm_request_prefetch_range(block_end + 1, VA_BLOCK_SIZE); // 仅 1 block
+    }
+}
+```
+
+---
+
+### 12.3 Eviction 算法
+
+#### LRU（UVM 默认）
+
+内核默认：chunk 使用时移到 eviction list 尾部（最后淘汰），头部优先淘汰。经典 LRU。
+
+#### MRU（纯 Most Recently Used）
+
+最近使用的 chunk 移到 eviction list 头部（最先淘汰）。理论上对周期性访问模式（LLM decode 循环遍历所有层）是 Belady-optimal，因为"刚用过 = 离下次使用最远"。
+
+**灾难性后果**：MRU 无差别地把 attention weights（每步都用的 T1 数据）也移到头部淘汰 → 每步都要重新搬入 attention → -83% 性能。
+
+#### cycle_moe（T1 频率保护 + 默认处理其余）
+
+**核心思想**：只保护高频 chunk（attention + embeddings），其余让内核默认 LRU 处理。
+
+```c
+// eviction_cycle_moe.bpf.c
+SEC("struct_ops/uvm_pmm_chunk_used")
+int BPF_PROG(uvm_pmm_chunk_used, ...) {
+    u32 idx = chunk_hash(chunk);
+    u8 *count = bpf_map_lookup_elem(&access_counts, &idx);
+    if (!count) return 0;
+    if (++(*count) >= T1_FREQ_THRESHOLD) {  // T1_FREQ_THRESHOLD = 3
+        bpf_uvm_pmm_chunk_move_tail(chunk, list);  // 保护（移到尾部）
+        return 1; // BYPASS
+    }
+    return 0;  // DEFAULT — 让内核 LRU 处理
+}
+```
+
+**使用 PERCPU_ARRAY 而非 HASH map**：HASH map 在 fault handler 热路径中延迟过高，导致 GPU MMU timeout → Xid 31 crash。
+
+#### MRU expert（T1 保护 + 非 T1 用 move_head）
+
+T1 chunk（freq ≥ 3）用 `move_tail` 保护；非 T1 chunk 用 `move_head` 显式移到头部优先淘汰。
+
+```c
+if (freq >= T1_THRESHOLD) {
+    bpf_uvm_pmm_chunk_move_tail(chunk, list);  // T1: 保护
+} else {
+    bpf_uvm_pmm_chunk_move_head(chunk, list);  // 非 T1: 优先淘汰
+}
+return 1; // BYPASS
+```
+
+**问题**：`move_head` 的 list manipulation 开销（spinlock + pointer update）抵消了 MRU 排序的理论收益。
+
+#### passive MRU（T1 保护 + 非 T1 冻结 LRU 位置）
+
+T1 chunk 用 `move_tail` 保护；非 T1 chunk 返回 BYPASS **但不调用任何 move 函数** — 这阻止了内核默认的 LRU 刷新（move_tail），chunk 保持在当前 list 位置。随着新 chunk 在 tail 端添加，旧 chunk 自然向 head 漂移，效果 ≈ FIFO。
+
+```c
+if (freq >= T1_THRESHOLD) {
+    bpf_uvm_pmm_chunk_move_tail(chunk, list);  // T1: 保护
+    return 1; // BYPASS
+}
+// 非 T1: BYPASS 但不 move — 冻结当前 LRU 位置
+return 1; // BYPASS, 无 move = passive MRU
+```
+
+**关键优势**：零 list manipulation 开销（不调用任何 move 函数），仅靠 "不做默认动作" 就实现了近似 MRU。
+
+#### template_belady（Belady 距离 eviction）
+
+**核心思想**：MSched 的 Belady OPT eviction 的 BPF 实现。从 chunk 的 VA 地址推断其所属层号（通过离线 chunk_trace 建立的 VA→layer 映射表），然后计算到当前层的**周期距离**（cycle distance），距离远的优先淘汰。
+
+```c
+SEC("struct_ops/uvm_pmm_chunk_used")
+int BPF_PROG(uvm_pmm_chunk_used, ...) {
+    // 1) T1 频率保护（同 passive MRU）
+    if (freq >= T1_THRESHOLD) {
+        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        return 1;
+    }
+    // 2) 获取 chunk VA → 查 boundary table → layer_id
+    uvm_va_block_t *va_block = BPF_CORE_READ(chunk, va_block);
+    u64 chunk_va = BPF_CORE_READ(va_block, start);
+    u32 chunk_layer = va_to_layer(chunk_va);  // linear scan 36 boundaries
+
+    // 3) Belady 距离 = 到下次使用的 cycle 距离
+    u32 distance = (chunk_layer - current_layer + NUM_LAYERS) % NUM_LAYERS;
+
+    if (distance <= protect_distance) {
+        bpf_uvm_pmm_chunk_move_tail(chunk, list);  // 即将使用 → 保护
+    } else {
+        bpf_uvm_pmm_chunk_move_head(chunk, list);  // 远距离 → 优先淘汰
+    }
+    return 1;
+}
+```
+
+**VA→layer 映射表**：由离线 `derive_layer_mapping.py` 从 chunk_trace 数据生成。将 prefill 阶段激活的 15,801 个 chunk 按 VA 排序后等分为 36 组（对应 36 层），生成 36 个 VA 边界值存入 BPF ARRAY map。
+
+---
+
+### 12.4 组合策略总表
+
+| 配置名称 | Prefetch 算法 | Eviction 算法 | 文件 |
+|---------|--------------|--------------|------|
+| Baseline (no BPF) | 内核默认 threshold=51 | 内核默认 LRU | — |
+| threshold=N | 内核 threshold=N | 内核默认 LRU | 模块参数 |
+| always_max | always_max (BYPASS) | 内核默认 LRU | `prefetch_always_max.bpf.c` |
+| stride | stride 模式 (BYPASS) | 内核默认 LRU | `prefetch_stride.bpf.c` |
+| none | 空 region (BYPASS) | 内核默认 LRU | — |
+| always_max + cycle_moe | always_max | T1 protect + DEFAULT | `prefetch_always_max_cycle_moe.bpf.c` |
+| always_max + MRU expert | always_max | T1 protect + move_head | `prefetch_max_mru_expert.bpf.c` |
+| always_max + passive MRU | always_max | T1 protect + freeze | `prefetch_max_passive_mru.bpf.c` |
+| template_belady | always_max | T1 protect + Belady distance | `prefetch_template_belady.bpf.c` |
+| cross-block aggressive | always_max + 2 adjacent blocks | T1 protect + freeze | `prefetch_cross_block.bpf.c` |
+| cross-block rate-limited | always_max + 1 adjacent block (dedup) | T1 protect + freeze | `prefetch_cross_block.bpf.c` |
+| MRU (纯) | 内核默认 | move_head (全部) | — |
+
+---
+
+## 13. 实验结果（2026-02-27）
+
+### 实现方案
+
+最终采用**内核 workqueue** 方案（非 bpf_wq）：
+- 3 个新 kfunc: `bpf_uvm_get_block_start_va()`, `bpf_uvm_get_block_end_va()`, `bpf_uvm_request_prefetch_range()`
+- Per-CPU prefetch context: 在 `rcu_read_lock()` 下设置，保证抢占安全
+- Ring buffer (64 slots) + workqueue worker: BPF kfunc 入队，worker 调用 `uvm_migrate_bpf()`
+- `uvm_migrate_bpf()`: 包装 static `uvm_migrate()`，自动管理 va_space read lock
+- 内核侧新增 ~80 行，BPF 侧复用已有 `prefetch_cross_block.bpf.c`
+- 编译通过，加载成功，无 Xid 错误
+
+### Benchmark 结果
+
+| 配置 | pp (tok/s) | tg (tok/s) | vs always_max |
+|------|-----------|-----------|---------------|
+| Baseline (no BPF, threshold=51) | 142.93 ± 0.47 | 47.24 ± 6.05 | — |
+| always_max + passive MRU | 223.86 ± 0.51 | 78.39 ± 6.88 | — (baseline) |
+| **cross-block 2 blocks (aggressive)** | 191.85 ± 4.30 | 62.61 ± 7.62 | **-14% pp, -20% tg** |
+| **cross-block 1 block (rate-limited)** | 206.67 ± 3.43 | 60.78 ± 7.04 | **-8% pp, -22% tg** |
+
+### 分析：为什么 cross-block prefetch 有害
+
+**根本原因: 1.84x oversubscription 下，proactive prefetch 是零和博弈。**
+
+每个 proactively prefetched 的 2MB block 必然 evict 一个 useful block：
+- 当前 VRAM 容量 = ~30 GB（32 GB 减去系统开销）
+- 模型大小 = 59 GB
+- Per token 需要 107 chunks (214 MB) 迁入 + 107 chunks (214 MB) 逐出 = 428 MB 总 DMA
+- Cross-block aggressive: ~100 extra blocks/token ≈ +200 MB DMA (+47% 额外流量)
+- Cross-block rate-limited: ~100 extra blocks/token（每个新 block 仅一次，但仍然太多）
+
+被 evict 的 block 之后还会被 demand-page 回来，形成恶性循环：
+```
+prefetch block N+1 → evict block M → later fault on M → migrate M back → evict block K → ...
+```
+
+### 什么条件下 cross-block prefetch 有效
+
+| 条件 | 当前情况 | 需要的情况 |
+|------|---------|-----------|
+| Oversubscription | 1.84x | < 1.0x（全部放得下） |
+| VRAM headroom | 0（满） | 有空闲槽位放 prefetch |
+| Prefetch 精度 | 盲目 adjacent | 精确 next-layer-only |
+| DMA 通道 | 共享（单 CE） | 独立（双 CE，MSched 方式） |
+
+### 初步结论（仅 llama.cpp 120B，1.84x oversubscription）
+
+1. **技术实现成功**: kfunc + 内核 workqueue 方案工作正常，无 crash/Xid，zero overhead when BPF not active
+2. **性能负增益**: 在 1.84x oversubscription 下，盲目 adjacent prefetch 有害
+3. **Cross-block prefetch 的价值场景**: oversubscription < 1.2x 时可能有正增益（VRAM 有余量放 prefetch）
+4. **MSched 方式的优势**: 它用独立 CE + 精确 template 做 proactive migration，绕过 UVM demand paging，而非在 UVM 内部做额外 migration
+
+**待验证**（§14）：
+- v1 只测了 llama.cpp 120B 一个 workload，结论可能不具普适性
+- 应在不同 oversubscription 级别和访问模式下测试（使用 `microbench/memory` 工具）
+- 应尝试 bpf_wq 方案替代内核 workqueue，减少内核代码量
+
+---
+
+## 14. 下一步：bpf_wq 方案 + 多 workload 验证
+
+### 14.1 为什么需要 bpf_wq 版本
+
+v1 使用内核 workqueue 存在以下问题：
+
+| 问题 | 内核 workqueue (v1) | bpf_wq (v2) |
+|------|-------------------|-------------|
+| 内核新增代码 | ~80 行（ring buffer + spinlock + worker + wq lifecycle） | ~15 行（仅 2 个 kfunc） |
+| 安全性 | ring buffer 满时静默丢请求 | BPF verifier 保证安全 |
+| 符合 gpu_ext 哲学 | 弱（大量内核基础设施代码） | 强（逻辑在 BPF 中） |
+| 可扩展性 | 修改逻辑需重编内核模块 | 修改 BPF 程序即可 |
+
+### 14.2 bpf_wq 方案设计
+
+**内核侧改动**（替换 v1 的 ring buffer/worker，净减 ~45 行）：
+
+```c
+// 删除: ring buffer, spinlock, kernel workqueue, bpf_prefetch_worker()
+// 删除: bpf_uvm_request_prefetch_range() kfunc
+
+// 新增 kfunc 1: 获取当前 fault 的 va_space handle
+__bpf_kfunc u64 bpf_uvm_get_va_space(void)
+{
+    struct uvm_bpf_prefetch_ctx *ctx = this_cpu_ptr(&bpf_prefetch_ctx);
+    return ctx->va_space ? (u64)ctx->va_space : 0;
+}
+
+// 新增 kfunc 2: sleepable — 从 bpf_wq callback 调用
+__bpf_kfunc int bpf_uvm_migrate_range(u64 va_space_handle, u64 addr, u64 length)
+{
+    uvm_va_space_t *va_space = (uvm_va_space_t *)va_space_handle;
+    if (!va_space || !length)
+        return -EINVAL;
+    return (int)uvm_migrate_bpf(va_space, addr, length);
+}
+
+// BTF 注册:
+BTF_ID_FLAGS(func, bpf_uvm_get_va_space)
+BTF_ID_FLAGS(func, bpf_uvm_migrate_range, KF_SLEEPABLE)
+```
+
+保留：per-CPU context、`bpf_uvm_get_block_start_va()`、`bpf_uvm_get_block_end_va()`、`uvm_migrate_bpf()` wrapper。
+
+**BPF 侧**（`extension/prefetch_cross_block_v2.bpf.c`）：
+
+```c
+#include "bpf_experimental.h"  // bpf_wq API
+
+struct prefetch_data {
+    u64 va_space;
+    u64 addr;
+    u64 length;
+    struct bpf_wq work;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, int);
+    __type(value, struct prefetch_data);
+} wq_map SEC(".maps");
+
+// bpf_wq callback — 进程上下文，可 sleep，调用 sleepable kfunc
+static int do_prefetch(void *map, int *key, void *value)
+{
+    struct prefetch_data *data = value;
+    if (data && data->va_space)
+        bpf_uvm_migrate_range(data->va_space, data->addr, data->length);
+    return 0;
+}
+
+SEC("struct_ops/uvm_prefetch_before_compute")
+int BPF_PROG(uvm_prefetch_before_compute, ...) {
+    // 1) intra-block: always_max
+    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+
+    // 2) cross-block: bpf_wq 调度异步 prefetch
+    u64 va_space = bpf_uvm_get_va_space();
+    u64 block_end = bpf_uvm_get_block_end_va();
+    if (va_space && block_end > 0) {
+        u32 zero = 0;
+        u64 *last = bpf_map_lookup_elem(&last_prefetch_block, &zero);
+        if (last && *last != block_end) {
+            *last = block_end;
+            int key = 0;
+            struct prefetch_data *data = bpf_map_lookup_elem(&wq_map, &key);
+            if (data) {
+                data->va_space = va_space;
+                data->addr = block_end + 1;
+                data->length = VA_BLOCK_SIZE;
+                bpf_wq_init(&data->work, &wq_map, 0);
+                bpf_wq_set_callback(&data->work, do_prefetch, 0);
+                bpf_wq_start(&data->work, 0);
+            }
+        }
+    }
+    return 1; // BYPASS
+}
+```
+
+**待验证的关键问题**：
+1. struct_ops BPF 程序能否调用 `bpf_wq_init/set_callback/start`（属于 `bpf_common_kfunc_set`）
+2. bpf_wq callback 能否调用 nvidia-uvm.ko 注册的 `KF_SLEEPABLE` kfunc
+3. 如果不行，fallback: 保留当前 v1 内核 workqueue 方案
+
+### 14.3 多 workload 验证计划
+
+v1 结论仅基于 llama.cpp 120B（1.84x oversubscription），需要用 `microbench/memory` 在不同条件下验证。
+
+**实验矩阵**：
+
+| Kernel | 访问模式 | size_factor | 预期 oversubscription |
+|--------|---------|-------------|----------------------|
+| `seq_stream` | 顺序流式 | 0.5, 1.0, 1.5, 2.0 | 0x → 2x |
+| `hotspot` | 5-point stencil | 0.5, 1.0, 1.5 | 0x → 1.5x |
+| `gemm` | LLM 式多层权重复用 | 0.5, 1.0, 1.5 | 0x → 1.5x |
+| `rand_stream` | 随机访问 | 0.5, 1.0, 1.5 | 0x → 1.5x |
+
+**对比配置**：
+1. Baseline (no BPF) — UVM 默认 threshold=51
+2. always_max + passive MRU — 当前最佳
+3. cross-block v1 (内核 wq) 或 v2 (bpf_wq) — 待测
+
+**关键假设验证**：
+- size_factor=0.5（全部放得下 VRAM）: cross-block 应无影响（不触发 eviction）
+- size_factor=1.0（刚好满）: cross-block 可能有正收益（少量 headroom）
+- size_factor=1.5-2.0（严重 oversubscription）: cross-block 预期有害（与 120B 结论一致）
+
+### 14.4 实施步骤
+
+1. **bpf_wq 可行性验证**: 修改内核模块 → 编译 → 写 v2 BPF 程序 → 编译加载测试
+2. **microbench baseline**: stock module，no BPF，各 kernel × size_factor
+3. **microbench + BPF**: custom module，always_max vs cross-block，各 kernel × size_factor
+4. **结果分析**: 找到 cross-block 的收益/损害临界点
+5. **更新结论**: 将 §13 的 "初步结论" 升级为完整结论
