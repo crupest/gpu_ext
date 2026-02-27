@@ -152,6 +152,12 @@ uv sync
 uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 ```
 
+## Paper
+
+> **gpu_ext: Extensible OS Policies for GPUs via eBPF**
+> Yusheng Zheng, Tong Yu, Yiwei Yang, Minghui Jiang, Xiangyu Gao, Jianchang Su, Yanpeng Hu, Wenan Mao, Wei Zhang, Dan Williams, Andi Quinn
+> [arXiv:2512.12615](https://arxiv.org/abs/2512.12615)
+
 ## Related
 
 - [bpftime](https://github.com/eunomia-bpf/bpftime) - GPU device-side eBPF support

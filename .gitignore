@@ -41,6 +41,9 @@ __pycache__/
 
 # Extension binaries (built from source)
 extension/eviction_cycle_moe
+extension/prefetch_template_belady
+extension/eviction_lfu_xcoord
+extension/sched_gpu_aware
 
 # Presentation build output
 docs/presentation/*/dist/
