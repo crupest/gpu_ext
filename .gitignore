@@ -42,6 +42,7 @@ __pycache__/
 # Extension binaries (built from source)
 extension/eviction_cycle_moe
 extension/prefetch_template_belady
+extension/prefetch_always_max_cycle_moe
 extension/eviction_lfu_xcoord
 extension/sched_gpu_aware
 
