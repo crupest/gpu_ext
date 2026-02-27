@@ -119,27 +119,27 @@ Virtual Address Space              Physical Memory (GPU VRAM)
 
 子状态：
 - **Activated** - 刚被分配，加入evictable list
-  - Hook: `uvm_pmm_chunk_activate`
+  - Hook: `gpu_block_activate`
 - **Being Used** - 正在被访问
-  - Hook: `uvm_pmm_chunk_used`
+  - Hook: `gpu_block_access`
 
 #### 状态3: **In-Eviction（驱逐中）**
 - 正在从当前VA block解除映射
 - 即将回到unused pool
-- Hook: `uvm_pmm_eviction_prepare`
+- Hook: `gpu_evict_prepare`
 
 ### 完整生命周期流程
 
 ```
 1. Chunk从unused pool分配给VA Block X
    ↓
-2. [uvm_pmm_chunk_activate]
+2. [gpu_block_activate]
    Chunk激活，加入evictable list（可被evict的候选）
    ↓
-3. [uvm_pmm_chunk_used - 可能多次]
+3. [gpu_block_access - 可能多次]
    VA Block X访问chunk，policy更新chunk的LRU位置
    ↓
-4. [uvm_pmm_eviction_prepare]
+4. [gpu_evict_prepare]
    内存压力触发，需要回收内存
    Policy选择victim chunks（最不值得保留的）
    ↓
@@ -286,12 +286,12 @@ NVIDIA UVM提供6个BPF struct_ops hook点，分为两类：
 
 ### 类别A: Eviction相关（内存回收）
 
-#### 1. `uvm_pmm_chunk_activate`
+#### 1. `gpu_block_activate`
 **触发时机**: Chunk被分配给VA block后，进入evictable状态
 
 **参数**:
 ```c
-int uvm_pmm_chunk_activate(
+int gpu_block_activate(
     uvm_pmm_gpu_t *pmm,              // GPU内存管理器
     uvm_gpu_chunk_t *chunk,          // 被激活的chunk
     struct list_head *list           // Evictable list
@@ -305,12 +305,12 @@ int uvm_pmm_chunk_activate(
 
 **示例**: LRU默认行为将chunk加到list尾部
 
-#### 2. `uvm_pmm_chunk_used`
+#### 2. `gpu_block_access`
 **触发时机**: Chunk被访问/使用（最关键的hook）
 
 **参数**:
 ```c
-int uvm_pmm_chunk_used(
+int gpu_block_access(
     uvm_pmm_gpu_t *pmm,
     uvm_gpu_chunk_t *chunk,          // 被访问的chunk
     struct list_head *list
@@ -325,12 +325,12 @@ int uvm_pmm_chunk_used(
 
 **重要性**: ⭐⭐⭐⭐⭐ 这是决定policy效果的关键hook
 
-#### 3. `uvm_pmm_eviction_prepare`
+#### 3. `gpu_evict_prepare`
 **触发时机**: 内存压力触发，需要evict内存
 
 **参数**:
 ```c
-int uvm_pmm_eviction_prepare(
+int gpu_evict_prepare(
     uvm_pmm_gpu_t *pmm,
     struct list_head *va_block_used,   // Used VA blocks list
     struct list_head *va_block_unused  // Unused VA blocks list
@@ -350,12 +350,12 @@ int uvm_pmm_eviction_prepare(
 
 Prefetch机制用于在实际访问前将数据从CPU迁移到GPU，减少page fault延迟。
 
-#### 4. `uvm_prefetch_before_compute`
+#### 4. `gpu_page_prefetch`
 **触发时机**: 在GPU kernel开始计算前，决定要prefetch哪些页面
 
 **参数**:
 ```c
-int uvm_prefetch_before_compute(
+int gpu_page_prefetch(
     uvm_page_index_t page_index,                    // 触发prefetch的页面索引
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,   // Prefetch候选页面树
     uvm_va_block_region_t *max_prefetch_region,     // 最大可prefetch区域
@@ -371,14 +371,14 @@ int uvm_prefetch_before_compute(
 **策略示例**:
 - **Always Max**: 直接prefetch整个`max_prefetch_region`
 - **None**: 设置`result_region`为空，禁用prefetch
-- **Adaptive**: 返回ENTER_LOOP，让`uvm_prefetch_on_tree_iter`决定
+- **Adaptive**: 返回ENTER_LOOP，让`gpu_page_prefetch_iter`决定
 
-#### 5. `uvm_prefetch_on_tree_iter`
-**触发时机**: 当`uvm_prefetch_before_compute`返回ENTER_LOOP时，对每个候选区域调用
+#### 5. `gpu_page_prefetch_iter`
+**触发时机**: 当`gpu_page_prefetch`返回ENTER_LOOP时，对每个候选区域调用
 
 **参数**:
 ```c
-int uvm_prefetch_on_tree_iter(
+int gpu_page_prefetch_iter(
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,
     uvm_va_block_region_t *current_region,    // 当前检查的区域
@@ -395,163 +395,60 @@ int uvm_prefetch_on_tree_iter(
 ```c
 // 只prefetch "热"区域（访问率 > threshold%）
 if (counter * 100 > subregion_pages * threshold) {
-    bpf_uvm_set_va_block_region(prefetch_region, first, outer);
+    bpf_gpu_set_prefetch_region(prefetch_region, first, outer);
     return 1;  // 选择这个区域
 }
 return 0;  // 跳过这个区域
 ```
 
-#### 6. `uvm_bpf_test_trigger_kfunc`
+#### 6. `gpu_test_trigger`
 **用途**: 测试/调试用，通过proc文件触发
 
 ---
 
-## Eviction策略
+## Eviction 策略
 
-### 已实现的策略
+UVM 从 list HEAD 开始 evict，TAIL 最安全。BPF 策略通过 `bpf_gpu_block_move_head/tail` 调整 chunk 在 list 中的位置来控制 eviction 优先级。
 
-#### 1. **LRU (Least Recently Used) - 默认**
-**文件**: 内核默认实现
-
-**工作原理**:
-```
-List结构（UVM从HEAD开始evict）:
-┌────────────────────────────────────────┐
-│  HEAD (evict from here)    TAIL (safe) │
-│  ↓                         ↓            │
-│  [老数据] → [中等] → ... → [新数据]     │
-│  list_first_entry() ←─ EVICT           │
-└────────────────────────────────────────┘
-```
-- `chunk_activate`: 将chunk加到list**尾部**（tail = 新数据，暂时安全）
-- `chunk_used`: 将chunk移到list**尾部**（tail = 最近使用，保护）
-- `eviction_prepare`: List**头部**（HEAD）的chunks优先被evict
-
-**适用场景**:
-- ✅ 有时间局部性（temporal locality）
-- ✅ 最近访问的数据很可能再次被访问
-
-#### 2. **FIFO (First In First Out)**
-**文件**: `lru_fifo.bpf.c`
-
-**工作原理**:
-```c
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used, ...) {
-    // 不移动chunk，保持插入顺序
-    return 1; // BYPASS
-}
-```
-
-**适用场景**:
-- ✅ **Sequential scan（顺序扫描）** - 如`seq_stream` kernel
-- ✅ **数据只使用一次（streaming workload）**
-- ✅ Working set > GPU memory（频繁eviction场景）
-- ❌ **不适合有重复访问的workload**（会evict掉可能再次访问的数据）
-
-**为什么对seq_stream最优**:
-1. **匹配访问模式**: Sequential = 一次性访问，最早访问的最先不需要
-2. **零维护开销**: `chunk_used`时直接bypass，不移动list
-3. **正确的victim选择**: FIFO自然选择最不需要的chunks
-4. **性能提升**: 相比LRU减少10-20%的list操作开销
+| 策略 | 文件 | 描述 | 适用场景 |
+|------|------|------|---------|
+| **LRU** | 内核默认 | 访问时移到 tail，最久未用的在 head 被 evict | 通用（有时间局部性） |
+| **FIFO** | `eviction_fifo.bpf.c` | 不移动 chunk，保持插入顺序。bypass 所有 access | 顺序扫描、streaming |
+| **FIFO + Second Chance** | `eviction_fifo_chance.bpf.c` | FIFO + PID-aware 二次机会。evict 时减 chance，被访问时如果 chance 被减则移到 tail 保护 | Multi-tenant + 混合访问模式 |
+| **MRU** | `eviction_mru.bpf.c` | 访问时移到 head，最近使用的优先 evict | 全扫描负载（scan-resistant） |
+| **LFU** | `eviction_lfu.bpf.c` | 按访问频率排序，低频在 head，高频移 tail | 热点数据保护 |
+| **LFU + xCoord** | `eviction_lfu_xcoord.bpf.c` | LFU + xCoord 论文的跨 GPU 协调驱逐 | Multi-GPU 场景 |
+| **PID Quota** | `eviction_pid_quota.bpf.c` | 按进程配额分配 GPU 内存，超额 chunk 不保护 | Multi-tenant 隔离 |
+| **Freq Decay** | `eviction_freq_pid_decay.bpf.c` | PID-aware 频率衰减，频率随时间递减 | 时间局部性 + 租户隔离 |
+| **Cycle MoE** | `eviction_cycle_moe.bpf.c` | MoE 模型感知：T1 层（attention/FFN）永久保护，非 T1 层冻结 LRU | MoE LLM inference |
 
 ---
 
-## Prefetch策略
+## Prefetch 策略
 
-### 已实现的策略
+Prefetch 在 page fault 时决定预取当前 VA block (2MB) 内的哪些页面。
 
-#### 1. **Always Max** - 激进预取
-**文件**: `prefetch_always_max.bpf.c`
+| 策略 | 文件 | 描述 | 适用场景 |
+|------|------|------|---------|
+| **Always Max** | `prefetch_always_max.bpf.c` | 总是预取整个 VA block (512 pages) | 顺序访问、带宽充足 |
+| **None** | `prefetch_none.bpf.c` | 禁用预取，纯 demand paging | 随机访问、带宽受限 |
+| **Adaptive Sequential** | `prefetch_adaptive_sequential.bpf.c` | 按访问密度阈值决定是否预取子区域 | 动态访问模式 |
+| **Adaptive Tree** | `prefetch_adaptive_tree_iter.bpf.c` | 遍历 bitmap tree，按每个子区域的 access count 决定 | 树结构遍历 |
+| **Stride** | `prefetch_stride.bpf.c` | 检测固定步长访问模式，预取下一个预测位置 | 固定步长访问（BLAS、矩阵） |
+| **PID Tree** | `prefetch_pid_tree.bpf.c` | PID-aware 预取带宽分配（高优先级进程更多预取） | Multi-tenant 预取隔离 |
 
-**工作原理**:
-```c
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute, ...) {
-    // 直接prefetch整个max_prefetch_region
-    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
-    return 1; // BYPASS
-}
-```
+---
 
-**优点**: 最大化GPU端数据可用性，减少page faults
-**缺点**: 可能预取不需要的数据，浪费PCIe带宽和GPU内存
+## 组合策略（Prefetch + Eviction）
 
-**适用场景**:
-- PCIe带宽充足
-- GPU内存充足
-- Kernel访问模式不确定
-
-#### 2. **None** - 禁用预取
-**文件**: `prefetch_none.bpf.c`
-
-**工作原理**:
-```c
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute, ...) {
-    // 设置为空region
-    bpf_uvm_set_va_block_region(result_region, 0, 0);
-    return 1; // BYPASS
-}
-```
-
-**适用场景**:
-- 需要按需迁移（demand paging）
-- PCIe带宽有限
-- 访问模式稀疏（sparse access）
-
-#### 3. **Adaptive Simple** - 基于阈值的自适应
-**文件**: `prefetch_adaptive_simple.bpf.c`
-
-**工作原理**:
-1. Userspace监控PCIe吞吐量，更新`threshold_map`
-2. BPF根据阈值决定是否prefetch某个区域
-
-```c
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter, ...) {
-    unsigned int threshold = get_threshold(); // 从map读取
-
-    // 计算访问密度
-    unsigned int subregion_pages = outer - first;
-
-    // 只prefetch热区域: counter/pages > threshold%
-    if (counter * 100 > subregion_pages * threshold) {
-        bpf_uvm_set_va_block_region(prefetch_region, first, outer);
-        return 1; // 选择此区域
-    }
-
-    return 0; // 跳过此区域
-}
-```
-
-**优点**:
-- 根据系统负载动态调整
-- 平衡prefetch收益和带宽成本
-
-**阈值含义**:
-- `threshold = 50%`: 如果区域内50%页面被访问，才prefetch
-- Higher threshold → 更保守（less prefetch）
-- Lower threshold → 更激进（more prefetch）
-
-**Userspace组件** (需要实现):
-```c
-// 伪代码：监控PCIe并更新阈值
-while (1) {
-    float pcie_usage = get_pcie_throughput();
-
-    if (pcie_usage > 0.8) {
-        threshold = 70;  // 高负载：更保守
-    } else if (pcie_usage > 0.5) {
-        threshold = 50;  // 中等负载：平衡
-    } else {
-        threshold = 30;  // 低负载：更激进
-    }
-
-    update_threshold_map(threshold);
-    sleep(1);
-}
-```
+| 策略 | 文件 | 描述 | 适用场景 |
+|------|------|------|---------|
+| **PID Prefetch+Eviction** | `prefetch_eviction_pid.bpf.c` | PID-aware 预取阈值 + probabilistic LRU 驱逐，统一参数控制 | Multi-tenant 全面隔离 |
+| **Always Max + Cycle MoE** | `prefetch_always_max_cycle_moe.bpf.c` | always_max 预取 + T1-protect 驱逐 | MoE LLM inference (最佳组合) |
+| **Max + MRU Expert** | `prefetch_max_mru_expert.bpf.c` | always_max 预取 + expert 感知 MRU 驱逐 | MoE 模型（expert 层分级保护） |
+| **Max + Passive MRU** | `prefetch_max_passive_mru.bpf.c` | always_max 预取 + T1 保护 + 非 T1 冻结 LRU | MoE 模型（轻量级） |
+| **Template Belady** | `prefetch_template_belady.bpf.c` | always_max 预取 + Belady OPT 驱逐（基于层循环距离） | MoE 模型 + profiling 数据 |
+| **Cross-Block v2** | `prefetch_cross_block_v2.bpf.c` | always_max 预取 + 跨 VA block 迁移 (bpf_wq) + passive MRU | 顺序访问 + 低 oversubscription |
 
 ### ⚠️ Prefetch的架构限制：只能在当前VA Block内
 
@@ -583,7 +480,7 @@ static uvm_va_block_region_t uvm_va_block_region_from_block(uvm_va_block_t *va_b
 #### BPF hook 受到的限制
 
 ```c
-int uvm_prefetch_before_compute(
+int gpu_page_prefetch(
     uvm_page_index_t page_index,                    // 0-511 范围
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,     // 永远是 [0, 512)
@@ -612,12 +509,13 @@ if (prefetch_region.outer > max_prefetch_region.outer)
 
 **NVIDIA 自己也知道这个限制，但目前没有实现跨 VA block prefetch。**
 
-#### 如果要实现跨 VA block prefetch？
+#### 跨 VA block prefetch 的实现
 
-需要修改 UVM 驱动内核代码：
-1. 修改 `uvm_perf_prefetch_prenotify_fault_migrations` 扩展 `max_prefetch_region`
-2. 或创建新的 API 触发相邻 VA block 的 prefetch
-3. 这需要内核模块级别的修改，**BPF hook 无法绕过这个限制**
+已通过 `prefetch_cross_block_v2.bpf.c` 实现：
+1. 添加 `bpf_gpu_migrate_range()` kfunc 到内核模块
+2. BPF 用 kprobe 捕获 va_block/va_space 上下文
+3. 通过 `bpf_wq` 异步调度相邻 VA block 的迁移
+4. 仅需 1 个 kfunc（action only），无需 getter kfunc
 
 #### 实际影响
 
@@ -651,79 +549,51 @@ Eviction目标: 在GPU内存不足时，回收最不重要的chunks
 
 ## 如何使用
 
-### 1. 编译BPF程序
+### 1. 编译
 
 ```bash
-cd /home/yunwei37/workspace/gpu/co-processor-demo/gpu_ext_policy/src
-make
+cd extension
+make        # 编译所有 BPF 策略和工具
 ```
 
-生成的文件:
-- `lru_fifo.bpf.o` - FIFO eviction policy
-- `prefetch_always_max.bpf.o` - Always max prefetch
-- `prefetch_none.bpf.o` - Disable prefetch
-- `prefetch_adaptive_simple.bpf.o` - Adaptive prefetch
+### 2. 加载 Policy
 
-### 2. 加载Policy
+每个策略编译为独立的 userspace loader 二进制文件，直接运行即可：
 
 ```bash
-# 加载FIFO eviction policy
-sudo bpftool struct_ops register obj lru_fifo.bpf.o
+# 加载 prefetch 策略
+sudo ./prefetch_always_max
 
-# 加载prefetch policy
-sudo bpftool struct_ops register obj prefetch_always_max.bpf.o
+# 加载 eviction 策略
+sudo ./eviction_lfu
+
+# 加载组合策略
+sudo ./prefetch_always_max_cycle_moe
+
+# 带参数加载（PID-aware 策略）
+sudo ./prefetch_pid_tree -p 1234 -P 20 -l 5678 -L 80
 ```
 
-### 3. 验证加载
+Loader 会自动清理旧的 struct_ops、加载 BPF 程序、attach struct_ops，Ctrl-C 退出时自动 detach。
+
+### 3. 验证
 
 ```bash
-# 查看已加载的struct_ops
-sudo bpftool struct_ops show
+# 查看已加载的 struct_ops
+sudo bpftool map list | grep struct_ops
 
-# 查看内核日志
-sudo dmesg | tail -20
-```
-
-### 4. 卸载Policy
-
-```bash
-# 找到struct_ops ID
-sudo bpftool struct_ops show
-
-# 卸载
-sudo bpftool struct_ops unregister id <ID>
-```
-
-### 5. 性能测试
-
-```bash
-# Baseline: 使用默认内核策略
-time ./your_workload
-
-# Test: 加载自定义policy
-sudo bpftool struct_ops register obj lru_fifo.bpf.o
-time ./your_workload
-
-# 对比page faults
-nvidia-smi dmon -s u
-```
-
-### 6. 调试
-
-**查看BPF日志**:
-```bash
+# 查看 BPF trace 输出
 sudo cat /sys/kernel/debug/tracing/trace_pipe
 ```
 
-**Trace chunk生命周期**:
-```bash
-# 运行trace工具
-cd ../scripts
-sudo ./chunk_trace -d 10 -o /tmp/trace.csv
+### 4. Trace 工具
 
-# 分析
-./analyze_chunk_trace.py /tmp/trace.csv
-./visualize_eviction.py /tmp/trace.csv -o /tmp
+```bash
+# Chunk 生命周期追踪
+sudo timeout 30 ./chunk_trace > /tmp/trace.csv
+
+# Prefetch 决策追踪
+sudo timeout 5 ./prefetch_trace > /tmp/prefetch.csv
 ```
 
 ---
@@ -748,16 +618,16 @@ sudo ./chunk_trace -d 10 -o /tmp/trace.csv
    - **Mixed pattern** → Adaptive (动态切换)
 
 4. **实现BPF程序**
-   - 参考 `lru_fifo.bpf.c` 作为模板
-   - 实现关键hooks（至少`chunk_used`）
-   - 添加必要的BPF maps（统计、配置等）
+   - 参考 `eviction_fifo.bpf.c`（简单 eviction）或 `prefetch_always_max.bpf.c`（简单 prefetch）
+   - 实现关键 hooks（至少 `gpu_block_access`）
+   - 添加必要的 BPF maps（统计、配置等）
+   - 在 Makefile 的 `BPF_APPS` 中添加新策略名
 
 5. **测试验证**
    ```bash
-   make
-   sudo bpftool struct_ops register obj my_policy.bpf.o
-   # 运行workload
-   # 对比性能指标
+   make my_policy
+   sudo ./my_policy
+   # 运行 workload，对比性能
    ```
 
 6. **迭代优化**

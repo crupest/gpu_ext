@@ -44,7 +44,7 @@ static uvm_va_block_region_t compute_prefetch_region(
     enum uvm_bpf_action action;
 
     // BPF hook 1: before_compute (可以完全绕过原算法)
-    action = uvm_bpf_call_before_compute_prefetch(page_index, bitmap_tree,
+    action = uvm_bpf_call_gpu_page_prefetch(page_index, bitmap_tree,
                                                    &max_prefetch_region, &prefetch_region);
 
     if (action == UVM_BPF_ACTION_BYPASS) {
@@ -57,9 +57,9 @@ static uvm_va_block_region_t compute_prefetch_region(
                 uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
 
             // BPF hook 2: on_tree_iter
-            // BPF 可通过 kfunc bpf_uvm_set_va_block_region(&prefetch_region, ...)
+            // BPF 可通过 kfunc bpf_gpu_set_prefetch_region(&prefetch_region, ...)
             // 修改 prefetch_region
-            (void)uvm_bpf_call_on_tree_iter(bitmap_tree, &max_prefetch_region,
+            (void)uvm_bpf_call_gpu_page_prefetch_iter(bitmap_tree, &max_prefetch_region,
                                              &subregion, counter, &prefetch_region);
         }
     }
@@ -183,20 +183,20 @@ if (thrashing_pages)
 
 ### 2.1 BPF Struct Ops 架构
 
-**核心机制**: 通过 `uvm_gpu_ext` struct_ops 实现可插拔的 prefetch policy
+**核心机制**: 通过 `gpu_mem_ops` struct_ops 实现可插拔的 prefetch policy
 
 ```c
-struct uvm_gpu_ext {
-    int (*uvm_bpf_test_trigger_kfunc)(const char *buf, int len);
+struct gpu_mem_ops {
+    int (*gpu_test_trigger)(const char *buf, int len);
 
     /* Prefetch hooks */
-    int (*uvm_prefetch_before_compute)(
+    int (*gpu_page_prefetch)(
         uvm_page_index_t page_index,
         uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
         uvm_va_block_region_t *max_prefetch_region,
         uvm_va_block_region_t *result_region);
 
-    int (*uvm_prefetch_on_tree_iter)(
+    int (*gpu_page_prefetch_iter)(
         uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
         uvm_va_block_region_t *max_prefetch_region,
         uvm_va_block_region_t *current_region,
@@ -206,8 +206,8 @@ struct uvm_gpu_ext {
 ```
 
 **可用的 BPF Kfuncs**:
-1. `__bpf_kfunc void bpf_uvm_set_va_block_region(region, first, outer)` - 设置 prefetch 区域
-2. `__bpf_kfunc int bpf_uvm_strstr(str, str_sz, substr, substr_sz)` - 字符串搜索辅助函数
+1. `__bpf_kfunc void bpf_gpu_set_prefetch_region(region, first, outer)` - 设置 prefetch 区域
+2. `__bpf_kfunc int bpf_gpu_strstr(str, str_sz, substr, substr_sz)` - 字符串搜索辅助函数
 
 **返回值约定**:
 - `1` = `UVM_BPF_ACTION_BYPASS` - BPF 完全接管，跳过内核逻辑
@@ -229,8 +229,8 @@ struct uvm_gpu_ext {
 **实现方式**: 使用 `BYPASS` 模式，直接返回空区域
 
 ```c
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
@@ -239,14 +239,14 @@ int BPF_PROG(uvm_prefetch_before_compute,
     bpf_printk("BPF prefetch_none: Disabling prefetch for page_index=%u\n", page_index);
 
     /* Set empty region via kfunc (first == outer means empty) */
-    bpf_uvm_set_va_block_region(result_region, 0, 0);
+    bpf_gpu_set_prefetch_region(result_region, 0, 0);
 
     return 1; /* UVM_BPF_ACTION_BYPASS */
 }
 ```
 
 **技术要点**:
-- ✅ 使用 **kfunc** `bpf_uvm_set_va_block_region()` 修改 `result_region`
+- ✅ 使用 **kfunc** `bpf_gpu_set_prefetch_region()` 修改 `result_region`
 - ✅ 空区域表示 = `first == outer`
 - ✅ `BYPASS` 模式完全跳过内核树遍历，降低开销
 - ✅ 可通过 `bpf_printk()` 调试输出到 `/sys/kernel/debug/tracing/trace_pipe`
@@ -270,8 +270,8 @@ int BPF_PROG(uvm_prefetch_before_compute,
 **实现方式**: 使用 `BYPASS` 模式 + **BPF CO-RE** 读取 `max_prefetch_region`
 
 ```c
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
@@ -287,7 +287,7 @@ int BPF_PROG(uvm_prefetch_before_compute,
                max_first, max_outer);
 
     /* Use kfunc to set result_region */
-    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+    bpf_gpu_set_prefetch_region(result_region, max_first, max_outer);
 
     return 1; /* UVM_BPF_ACTION_BYPASS */
 }
@@ -333,22 +333,22 @@ static __always_inline unsigned int get_threshold(void)
     return threshold ? *threshold : 51;  // Default 51%
 }
 
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
              uvm_va_block_region_t *result_region)
 {
     /* Initialize result_region to empty */
-    bpf_uvm_set_va_block_region(result_region, 0, 0);
+    bpf_gpu_set_prefetch_region(result_region, 0, 0);
 
     /* Return ENTER_LOOP to trigger tree iteration */
     return 2; // UVM_BPF_ACTION_ENTER_LOOP
 }
 
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter,
+SEC("struct_ops/gpu_page_prefetch_iter")
+int BPF_PROG(gpu_page_prefetch_iter,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
              uvm_va_block_region_t *current_region,
@@ -368,7 +368,7 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
                    counter, subregion_pages, threshold, first, outer);
 
         /* Update prefetch_region via kfunc */
-        bpf_uvm_set_va_block_region(prefetch_region, first, outer);
+        bpf_gpu_set_prefetch_region(prefetch_region, first, outer);
 
         return 1; // Indicate we selected this region
     }
@@ -420,7 +420,7 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
 long bpf_probe_read(void *dst, u32 size, const void *unsafe_ptr);
 
 // Kfunc (类型安全，编译时检查)
-__bpf_kfunc void bpf_uvm_set_va_block_region(
+__bpf_kfunc void bpf_gpu_set_prefetch_region(
     uvm_va_block_region_t *region,  // 类型明确
     uvm_page_index_t first,         // 类型明确
     uvm_page_index_t outer);        // 类型明确
@@ -572,7 +572,7 @@ if (stride == detected_stride) {
 - 使用 `BYPASS` 模式（完全自定义逻辑）
 - 通过 **BPF hash map** 记录每个 VA block 的访问历史
 - 在 `before_compute` hook 中检测步长并预测下一个访问
-- 使用 **kfunc** `bpf_uvm_set_va_block_region` 设置预测区域
+- 使用 **kfunc** `bpf_gpu_set_prefetch_region` 设置预测区域
 
 **适用场景**:
 - 规律的顺序/跳跃访问（矩阵行/列遍历）
@@ -603,7 +603,7 @@ if (occupancy > 90%) {
 **BPF 实现方式**:
 - 使用 `ENTER_LOOP` 模式（复用内核树遍历）
 - 在 `on_tree_iter` hook 中根据 counter 动态选择粒度
-- 通过 **kfunc** `bpf_uvm_set_va_block_region` 修改 `prefetch_region`
+- 通过 **kfunc** `bpf_gpu_set_prefetch_region` 修改 `prefetch_region`
 - 返回值 `1` 表示选择当前子区域，返回 `0` 继续遍历
 
 **适用场景**:
@@ -704,8 +704,8 @@ struct {
     __type(value, u32);  // Threshold percentage (0-100)
 } threshold_map SEC(".maps");
 
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter, ...)
+SEC("struct_ops/gpu_page_prefetch_iter")
+int BPF_PROG(gpu_page_prefetch_iter, ...)
 {
     /* Get threshold from map (set by userspace) */
     u32 key = 0;
@@ -713,7 +713,7 @@ int BPF_PROG(uvm_prefetch_on_tree_iter, ...)
 
     /* Apply adaptive threshold */
     if (counter * 100 > subregion_pages * (*threshold)) {
-        bpf_uvm_set_va_block_region(prefetch_region, first, outer);
+        bpf_gpu_set_prefetch_region(prefetch_region, first, outer);
         return 1;
     }
     return 0;
@@ -771,13 +771,13 @@ while (!exiting) {
 #### ✅ 已实现的关键特性
 
 **1. 完整的 Struct Ops 支持**
-- ✅ `uvm_prefetch_before_compute` hook - 完全接管 prefetch 决策
-- ✅ `uvm_prefetch_on_tree_iter` hook - 在树遍历中插入自定义逻辑
+- ✅ `gpu_page_prefetch` hook - 完全接管 prefetch 决策
+- ✅ `gpu_page_prefetch_iter` hook - 在树遍历中插入自定义逻辑
 - ✅ 支持 `BYPASS`, `ENTER_LOOP`, `DEFAULT` 三种模式
 
 **2. Kfunc 支持**
-- ✅ `bpf_uvm_set_va_block_region()` - 修改 prefetch 区域（类型安全）
-- ✅ `bpf_uvm_strstr()` - 字符串匹配辅助函数
+- ✅ `bpf_gpu_set_prefetch_region()` - 修改 prefetch 区域（类型安全）
+- ✅ `bpf_gpu_strstr()` - 字符串匹配辅助函数
 - ✅ `KF_TRUSTED_ARGS` 标记确保指针安全性
 
 **3. 状态维护**
@@ -854,7 +854,7 @@ NVIDIA UVM driver 的 prefetch 实现：
 | **prefetch_adaptive_simple** | ✅ 已实现 | `ENTER_LOOP` + BPF Map | 动态负载，用户态反馈调优 |
 
 **技术亮点**:
-- ✅ 所有 policy 都使用 **Kfunc** `bpf_uvm_set_va_block_region()` 修改 prefetch 区域
+- ✅ 所有 policy 都使用 **Kfunc** `bpf_gpu_set_prefetch_region()` 修改 prefetch 区域
 - ✅ `prefetch_adaptive_simple` 展示了**用户态-内核态协同**（通过 BPF Map 通信）
 - ✅ 支持运行时动态切换 policy（无需重启或重编译内核）
 

@@ -28,31 +28,31 @@ char _license[] SEC("license") = "GPL";
  *   先 evict                      后 evict
  */
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
     /* 新 chunk 加到 TAIL，给它一点时间被使用 */
-    bpf_uvm_pmm_chunk_move_tail(chunk, list);
+    bpf_gpu_block_move_tail(chunk, list);
     bpf_printk("BPF MRU: chunk_activate, moved to tail\n");
     return 1; /* BYPASS */
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
     /* MRU 核心：访问后移到 HEAD，让它优先被 evict */
-    bpf_uvm_pmm_chunk_move_head(chunk, list);
+    bpf_gpu_block_move_head(chunk, list);
     return 1; /* BYPASS */
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -64,11 +64,11 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
 
 /* Define the struct_ops map */
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_mru = {
-    .uvm_bpf_test_trigger_kfunc = (void *)NULL,
-    .uvm_prefetch_before_compute = (void *)NULL,
-    .uvm_prefetch_on_tree_iter = (void *)NULL,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_mru = {
+    .gpu_test_trigger = (void *)NULL,
+    .gpu_page_prefetch = (void *)NULL,
+    .gpu_page_prefetch_iter = (void *)NULL,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };

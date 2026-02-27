@@ -6,7 +6,7 @@
  * and va_space into a per-CPU map. The struct_ops hook reads this context
  * and schedules cross-block prefetch via bpf_wq.
  *
- * No kernel module changes needed for context — only bpf_uvm_migrate_range()
+ * No kernel module changes needed for context — only bpf_gpu_migrate_range()
  * kfunc is required (action kfunc that calls internal uvm_migrate).
  *
  * Pattern reference: extension/prefetch_trace.bpf.c
@@ -34,7 +34,7 @@ char _license[] SEC("license") = "GPL";
 struct va_block_ctx {
     u64 va_start;
     u64 va_end;
-    u64 va_space;   /* opaque handle for bpf_uvm_migrate_range() */
+    u64 va_space;   /* opaque handle for bpf_gpu_migrate_range() */
 };
 
 struct {
@@ -133,14 +133,14 @@ static int do_prefetch(void *map, int *key, void *value)
 {
     struct prefetch_data *data = value;
     if (data && data->va_space && data->length)
-        bpf_uvm_migrate_range(data->va_space, data->addr, data->length);
+        bpf_gpu_migrate_range(data->va_space, data->addr, data->length);
     return 0;
 }
 
 /* ===== PREFETCH: always_max + bpf_wq cross-block ===== */
 
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
@@ -149,7 +149,7 @@ int BPF_PROG(uvm_prefetch_before_compute,
     /* 1) Intra-block: always_max — prefetch entire VA block */
     uvm_page_index_t max_first = BPF_CORE_READ(max_prefetch_region, first);
     uvm_page_index_t max_outer = BPF_CORE_READ(max_prefetch_region, outer);
-    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+    bpf_gpu_set_prefetch_region(result_region, max_first, max_outer);
 
     /* 2) Cross-block: read va_block context from per-CPU kprobe cache,
      * schedule async prefetch of next adjacent block via bpf_wq.
@@ -181,8 +181,8 @@ int BPF_PROG(uvm_prefetch_before_compute,
     return 1; /* BYPASS */
 }
 
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter,
+SEC("struct_ops/gpu_page_prefetch_iter")
+int BPF_PROG(gpu_page_prefetch_iter,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
              uvm_va_block_region_t *current_region,
@@ -194,8 +194,8 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
 
 /* ===== EVICTION: T1-protect + passive MRU ===== */
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -203,8 +203,8 @@ int BPF_PROG(uvm_pmm_chunk_activate,
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -222,7 +222,7 @@ int BPF_PROG(uvm_pmm_chunk_used,
 
     if (c + 1 >= T1_FREQ_THRESHOLD) {
         /* T1: protect */
-        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        bpf_gpu_block_move_tail(chunk, list);
         return 1;
     }
 
@@ -230,8 +230,8 @@ int BPF_PROG(uvm_pmm_chunk_used,
     return 1;
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -239,18 +239,18 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
     return 0;
 }
 
-SEC("struct_ops/uvm_bpf_test_trigger_kfunc")
-int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
+SEC("struct_ops/gpu_test_trigger")
+int BPF_PROG(gpu_test_trigger, const char *buf, int len)
 {
     return 0;
 }
 
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_cross_block_v2 = {
-    .uvm_bpf_test_trigger_kfunc = (void *)uvm_bpf_test_trigger_kfunc,
-    .uvm_prefetch_before_compute = (void *)uvm_prefetch_before_compute,
-    .uvm_prefetch_on_tree_iter = (void *)uvm_prefetch_on_tree_iter,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_cross_block_v2 = {
+    .gpu_test_trigger = (void *)gpu_test_trigger,
+    .gpu_page_prefetch = (void *)gpu_page_prefetch,
+    .gpu_page_prefetch_iter = (void *)gpu_page_prefetch_iter,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };

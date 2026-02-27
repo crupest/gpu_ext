@@ -199,21 +199,21 @@ sudo ./eviction_my_policy
 
 ## 9. BPF Struct_Ops 架构
 
-当前使用的 `struct uvm_gpu_ext` 定义了 6 个 hook：
+当前使用的 `struct gpu_mem_ops` 定义了 6 个 hook：
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // 测试 hook
-    int (*uvm_bpf_test_trigger_kfunc)(...);
+    int (*gpu_test_trigger)(...);
 
     // Prefetch hooks
-    int (*uvm_prefetch_before_compute)(...);
-    int (*uvm_prefetch_on_tree_iter)(...);
+    int (*gpu_page_prefetch)(...);
+    int (*gpu_page_prefetch_iter)(...);
 
     // Eviction hooks
-    int (*uvm_pmm_chunk_activate)(...);     // 低频 (~6.7k/s)
-    int (*uvm_pmm_chunk_used)(...);         // 高频 (~70k/s)
-    int (*uvm_pmm_eviction_prepare)(...);   // 低频 (~6.7k/s)
+    int (*gpu_block_activate)(...);     // 低频 (~6.7k/s)
+    int (*gpu_block_access)(...);         // 高频 (~70k/s)
+    int (*gpu_evict_prepare)(...);   // 低频 (~6.7k/s)
 };
 ```
 

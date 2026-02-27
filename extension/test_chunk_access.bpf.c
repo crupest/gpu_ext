@@ -23,8 +23,8 @@ struct {
     __type(value, u64);  /* access count */
 } chunk_freq SEC(".maps");
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -66,8 +66,8 @@ int BPF_PROG(uvm_pmm_chunk_activate,
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -91,8 +91,8 @@ int BPF_PROG(uvm_pmm_chunk_used,
     return 0;  // Let kernel do default LRU
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -122,11 +122,11 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
 }
 
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_test_chunk_access = {
-    .uvm_bpf_test_trigger_kfunc = (void *)NULL,
-    .uvm_prefetch_before_compute = (void *)NULL,
-    .uvm_prefetch_on_tree_iter = (void *)NULL,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_test_chunk_access = {
+    .gpu_test_trigger = (void *)NULL,
+    .gpu_page_prefetch = (void *)NULL,
+    .gpu_page_prefetch_iter = (void *)NULL,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };

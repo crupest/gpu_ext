@@ -395,10 +395,10 @@ static const struct btf_kfunc_id_set uvm_list_kfunc_set = {
 
 ### 3.3 BPF Struct Ops Hook for LRU Selection
 
-Extend `uvm_gpu_ext` structure with LRU eviction hook:
+Extend `gpu_mem_ops` structure with LRU eviction hook:
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     /* ... existing hooks ... */
 
     /**
@@ -543,7 +543,7 @@ int BPF_PROG(uvm_on_chunk_access, u64 gpu_phys_addr)
 
 /* Define struct_ops map */
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_lru_frequency = {
+struct gpu_mem_ops uvm_ops_lru_frequency = {
     .uvm_lru_select_victim = (void *)uvm_lru_select_victim,
     .uvm_on_chunk_access = (void *)uvm_on_chunk_access,
 };
@@ -650,8 +650,8 @@ static uvm_gpu_root_chunk_t *pick_root_chunk_to_evict(uvm_pmm_gpu_t *pmm)
         return root_chunk_from_chunk(pmm, chunk);
 
     /* Try BPF policy if registered */
-    if (uvm_gpu_ext_registered()) {
-        ret = uvm_gpu_ext_ops->uvm_lru_select_victim(
+    if (gpu_mem_ops_registered()) {
+        ret = gpu_mem_ops_ops->uvm_lru_select_victim(
             pmm,
             (struct uvm_bpf_list_head *)&pmm->root_chunks.va_block_used,
             (struct uvm_bpf_list_head *)&pmm->root_chunks.va_block_unused,
@@ -784,7 +784,7 @@ if (selected) {
 ### 9.1 Additional Hooks
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     /* ... existing ... */
 
     /* Hook when chunk is accessed (for frequency tracking) */
@@ -826,7 +826,7 @@ Potential for ML-based eviction policies:
 
 3. **Implementation Steps**:
    - Add kfunc wrappers in `uvm_bpf_struct_ops.c`
-   - Extend `uvm_gpu_ext` with LRU hook
+   - Extend `gpu_mem_ops` with LRU hook
    - Modify `pick_root_chunk_to_evict()` to call BPF
    - Implement example policies (frequency-aware, working-set, etc.)
 

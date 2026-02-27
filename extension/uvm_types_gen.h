@@ -5552,13 +5552,13 @@ struct bpf_struct_ops_common_value {
 	long: 64;
 };
 
-struct uvm_gpu_ext {
-	int (*uvm_bpf_test_trigger_kfunc)(const char *, int);
-	int (*uvm_prefetch_before_compute)(uvm_page_index_t, uvm_perf_prefetch_bitmap_tree_t *, uvm_va_block_region_t *, uvm_va_block_region_t *);
-	int (*uvm_prefetch_on_tree_iter)(uvm_page_index_t, uvm_perf_prefetch_bitmap_tree_t *, uvm_va_block_region_t *, uvm_va_block_region_t *, unsigned int, unsigned int);
+struct gpu_mem_ops {
+	int (*gpu_test_trigger)(const char *, int);
+	int (*gpu_page_prefetch)(uvm_page_index_t, uvm_perf_prefetch_bitmap_tree_t *, uvm_va_block_region_t *, uvm_va_block_region_t *);
+	int (*gpu_page_prefetch_iter)(uvm_page_index_t, uvm_perf_prefetch_bitmap_tree_t *, uvm_va_block_region_t *, uvm_va_block_region_t *, unsigned int, unsigned int);
 };
 
-struct bpf_struct_ops_uvm_gpu_ext {
+struct bpf_struct_ops_gpu_mem_ops {
 	struct bpf_struct_ops_common_value common;
 	long: 64;
 	long: 64;
@@ -5567,7 +5567,7 @@ struct bpf_struct_ops_uvm_gpu_ext {
 	long: 64;
 	long: 64;
 	long: 64;
-	struct uvm_gpu_ext data;
+	struct gpu_mem_ops data;
 	long: 64;
 	long: 64;
 	long: 64;
@@ -10576,8 +10576,8 @@ typedef bool (*uvm_va_policy_is_split_needed_t)(const uvm_va_policy_t *, void *)
 
 /* BPF kfuncs */
 #ifndef BPF_NO_KFUNC_PROTOTYPES
-extern void bpf_uvm_set_va_block_region(uvm_va_block_region_t *region, uvm_page_index_t first, uvm_page_index_t outer) __weak __ksym;
-extern int bpf_uvm_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz) __weak __ksym;
+extern void bpf_gpu_set_prefetch_region(uvm_va_block_region_t *region, uvm_page_index_t first, uvm_page_index_t outer) __weak __ksym;
+extern int bpf_gpu_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz) __weak __ksym;
 #endif
 
 #ifndef BPF_NO_PRESERVE_ACCESS_INDEX

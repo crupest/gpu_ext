@@ -1075,7 +1075,7 @@ static void block_clear_resident_processor(uvm_va_block_t *block, uvm_processor_
 适用于：FIFO、简单 LRU
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_prepare_eviction)(uvm_pmm_gpu_t *pmm);
 };
@@ -1092,7 +1092,7 @@ struct uvm_gpu_ext {
 适用于：所有主流算法
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_on_mark_unused)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_prepare_eviction)(uvm_pmm_gpu_t *pmm);
@@ -1132,7 +1132,7 @@ struct uvm_gpu_ext {
 适用于：需要对称性的复杂算法
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_on_mark_used)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_on_mark_unused)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);

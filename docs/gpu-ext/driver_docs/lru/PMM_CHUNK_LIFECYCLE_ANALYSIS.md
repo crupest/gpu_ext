@@ -259,16 +259,16 @@ int BPF_PROG(uvm_pmm_chunk_depopulate, uvm_pmm_gpu_t *pmm,
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate, uvm_pmm_gpu_t *pmm,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate, uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk, struct list_head *list)
 {
     // BYPASS: 激活不改变分配顺序
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare, uvm_pmm_gpu_t *pmm,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare, uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used, struct list_head *va_block_unused)
 {
     // 可选：如果需要可以按 chunk 地址重排序

@@ -144,8 +144,8 @@ static __always_inline u32 belady_distance(u32 chunk_layer, u32 current_layer, u
 
 /* ===== PREFETCH: always_max (proven best for MoE) ===== */
 
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
@@ -154,12 +154,12 @@ int BPF_PROG(uvm_prefetch_before_compute,
     /* always_max: prefetch entire VA block on any fault */
     uvm_page_index_t max_first = BPF_CORE_READ(max_prefetch_region, first);
     uvm_page_index_t max_outer = BPF_CORE_READ(max_prefetch_region, outer);
-    bpf_uvm_set_va_block_region(result_region, max_first, max_outer);
+    bpf_gpu_set_prefetch_region(result_region, max_first, max_outer);
     return 1; /* BYPASS */
 }
 
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter,
+SEC("struct_ops/gpu_page_prefetch_iter")
+int BPF_PROG(gpu_page_prefetch_iter,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
              uvm_va_block_region_t *current_region,
@@ -171,8 +171,8 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
 
 /* ===== EVICTION: T1-protect + Belady distance ===== */
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -211,8 +211,8 @@ int BPF_PROG(uvm_pmm_chunk_activate,
     return 0; /* Let kernel handle activation (safe — no move_head) */
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -230,7 +230,7 @@ int BPF_PROG(uvm_pmm_chunk_used,
 
     if (c + 1 >= T1_FREQ_THRESHOLD) {
         /* T1 chunk: always protect */
-        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        bpf_gpu_block_move_tail(chunk, list);
         return 1; /* BYPASS */
     }
 
@@ -259,18 +259,18 @@ int BPF_PROG(uvm_pmm_chunk_used,
 
     if (distance <= protect_dist) {
         /* Coming soon → protect */
-        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        bpf_gpu_block_move_tail(chunk, list);
     } else if (distance > cfg->num_layers / 2) {
         /* Far away → prioritize for eviction */
-        bpf_uvm_pmm_chunk_move_head(chunk, list);
+        bpf_gpu_block_move_head(chunk, list);
     }
     /* Middle distance: no move (passive ordering) */
 
     return 1; /* BYPASS */
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -278,18 +278,18 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
     return 0;
 }
 
-SEC("struct_ops/uvm_bpf_test_trigger_kfunc")
-int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
+SEC("struct_ops/gpu_test_trigger")
+int BPF_PROG(gpu_test_trigger, const char *buf, int len)
 {
     return 0;
 }
 
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_template_belady = {
-    .uvm_bpf_test_trigger_kfunc = (void *)uvm_bpf_test_trigger_kfunc,
-    .uvm_prefetch_before_compute = (void *)uvm_prefetch_before_compute,
-    .uvm_prefetch_on_tree_iter = (void *)uvm_prefetch_on_tree_iter,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_template_belady = {
+    .gpu_test_trigger = (void *)gpu_test_trigger,
+    .gpu_page_prefetch = (void *)gpu_page_prefetch,
+    .gpu_page_prefetch_iter = (void *)gpu_page_prefetch_iter,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };

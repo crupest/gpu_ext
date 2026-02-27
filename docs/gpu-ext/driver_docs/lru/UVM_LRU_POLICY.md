@@ -1926,7 +1926,7 @@ LHD     → 150 行代码 → O(1) 访问 + O(100) 驱逐
 你的设计需要 **4 个 Hook**（3 必需 + 1 可选）来支持完整的策略：
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // ✅ 必需：chunk unpin（分配完成、状态转换）
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
 
@@ -2241,7 +2241,7 @@ int (*choose_eviction_list)(uvm_pmm_gpu_t *pmm) {
 #### 当前设计
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_on_mark_used)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*uvm_lru_on_mark_unused)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
@@ -2324,7 +2324,7 @@ on_chunk_ready      vs  on_eviction_needed  // 语义不同
 #### 方案 A: 基于状态转换（推荐 ⭐⭐⭐⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Chunk 变为可驱逐状态（unpin 完成）
     int (*on_chunk_ready)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2358,7 +2358,7 @@ on_chunk_deactivated // 更明确：chunk 被停用（无数据）
 #### 方案 B: 基于链表操作（不推荐 ⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*on_chunk_added_to_lru)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*on_chunk_moved_to_used)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*on_chunk_moved_to_unused)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
@@ -2377,7 +2377,7 @@ struct uvm_gpu_ext {
 #### 方案 C: 基于生命周期（推荐 ⭐⭐⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Chunk 分配完成
     int (*on_chunk_allocated)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2403,7 +2403,7 @@ struct uvm_gpu_ext {
 #### 方案 D: 基于驱逐成本（最推荐 ⭐⭐⭐⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Chunk unpin（变为可驱逐）
     int (*on_chunk_available)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2431,7 +2431,7 @@ struct uvm_gpu_ext {
 #### 推荐 A：简洁清晰版（⭐⭐⭐⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Chunk unpin（加入/更新 LRU）
     int (*on_chunk_unpin)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2457,7 +2457,7 @@ struct uvm_gpu_ext {
 #### 推荐 B：面向状态版（⭐⭐⭐⭐）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Chunk 变为可驱逐状态
     int (*on_chunk_evictable)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2555,7 +2555,7 @@ void (*refill)(...);
 #### 🏆 最佳方案：推荐 A（`populate/depopulate`）
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*on_chunk_unpin)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*on_chunk_populate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     int (*on_chunk_depopulate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
@@ -2634,25 +2634,25 @@ bpf_uvm_chunk_prev()
 从 `uvm_bpf_struct_ops.c` 可以看到：
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Hook 命名格式：uvm_<模块>_<时机>
-    int (*uvm_prefetch_before_compute)(...);
-    int (*uvm_prefetch_on_tree_iter)(...);
+    int (*gpu_page_prefetch)(...);
+    int (*gpu_page_prefetch_iter)(...);
 };
 
-// CFI stub 命名格式：uvm_gpu_ext__<hook名>
-static int uvm_gpu_ext__uvm_prefetch_before_compute(...) {
+// CFI stub 命名格式：gpu_mem_ops__<hook名>
+static int gpu_mem_ops__gpu_page_prefetch(...) {
     return UVM_BPF_ACTION_DEFAULT;
 }
 
 // Kfunc 命名格式：bpf_uvm_<动作>
-__bpf_kfunc void bpf_uvm_set_va_block_region(...);
+__bpf_kfunc void bpf_gpu_set_prefetch_region(...);
 ```
 
 **命名规范**：
 1. Hook 名称：`uvm_<子系统>_<时机/动作>`
 2. 必须有 `uvm_` 前缀
-3. CFI stub：`uvm_gpu_ext__<hook名>`
+3. CFI stub：`gpu_mem_ops__<hook名>`
 4. Kfunc：`bpf_uvm_<动作>`
 
 #### 发现 2: Chunk 是 GPU **物理内存**
@@ -2678,7 +2678,7 @@ __bpf_kfunc void bpf_uvm_set_va_block_region(...);
 
 **原设计**（不符合规范）：
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*on_chunk_unpin)(...);          // ❌ 缺少 uvm_ 前缀
     int (*on_chunk_populate)(...);       // ❌ 缺少 uvm_ 前缀
     int (*on_chunk_depopulate)(...);     // ❌ 缺少 uvm_ 前缀
@@ -2688,11 +2688,11 @@ struct uvm_gpu_ext {
 
 **应该是**（符合规范）：
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     int (*uvm_pmm_chunk_unpin)(...);         // ✅ 有 uvm_ 前缀
     int (*uvm_pmm_chunk_populate)(...);      // ✅ 有 uvm_ 前缀
     int (*uvm_pmm_chunk_depopulate)(...);    // ✅ 有 uvm_ 前缀
-    int (*uvm_pmm_eviction_prepare)(...);    // ✅ 有 uvm_ 前缀
+    int (*gpu_evict_prepare)(...);    // ✅ 有 uvm_ 前缀
 };
 ```
 
@@ -2704,7 +2704,7 @@ struct uvm_gpu_ext {
 |---------|------|---------|
 | `on_chunk_unpin` | 不清楚是什么 chunk | `uvm_pmm_chunk_unpin` |
 | `on_chunk_populate` | 缺少上下文 | `uvm_pmm_chunk_populate` |
-| `bpf_uvm_chunk_move_head` | 不清楚管理什么 | `bpf_uvm_pmm_chunk_move_head` |
+| `bpf_uvm_chunk_move_head` | 不清楚管理什么 | `bpf_gpu_block_move_head` |
 
 **`pmm_` 中缀的价值**：
 - ✅ 明确是 **Physical Memory Manager** 的 chunk
@@ -2716,7 +2716,7 @@ struct uvm_gpu_ext {
 #### Hook 命名
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // PMM chunk unpin（chunk 变为可驱逐）
     int (*uvm_pmm_chunk_unpin)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
@@ -2727,30 +2727,30 @@ struct uvm_gpu_ext {
     int (*uvm_pmm_chunk_depopulate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
     
     // PMM 准备驱逐
-    int (*uvm_pmm_eviction_prepare)(uvm_pmm_gpu_t *pmm);
+    int (*gpu_evict_prepare)(uvm_pmm_gpu_t *pmm);
 };
 ```
 
 #### CFI Stub 命名（按照规范）
 
 ```c
-// CFI stub 格式：uvm_gpu_ext__<hook名>
-static int uvm_gpu_ext__uvm_pmm_chunk_unpin(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
+// CFI stub 格式：gpu_mem_ops__<hook名>
+static int gpu_mem_ops__uvm_pmm_chunk_unpin(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return 0;  // Default: do nothing
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_populate(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
+static int gpu_mem_ops__uvm_pmm_chunk_populate(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return 0;
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_depopulate(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
+static int gpu_mem_ops__uvm_pmm_chunk_depopulate(uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return 0;
 }
 
-static int uvm_gpu_ext__uvm_pmm_eviction_prepare(uvm_pmm_gpu_t *pmm)
+static int gpu_mem_ops__gpu_evict_prepare(uvm_pmm_gpu_t *pmm)
 {
     return 0;
 }
@@ -2762,8 +2762,8 @@ static int uvm_gpu_ext__uvm_pmm_eviction_prepare(uvm_pmm_gpu_t *pmm)
 // 格式：bpf_uvm_pmm_<对象>_<动作>
 
 // 链表操作
-__bpf_kfunc void bpf_uvm_pmm_chunk_move_head(u64 chunk_addr);
-__bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(u64 chunk_addr);
+__bpf_kfunc void bpf_gpu_block_move_head(u64 chunk_addr);
+__bpf_kfunc void bpf_gpu_block_move_tail(u64 chunk_addr);
 __bpf_kfunc void bpf_uvm_pmm_chunk_move_before(u64 chunk_addr, u64 target);
 __bpf_kfunc void bpf_uvm_pmm_chunk_move_after(u64 chunk_addr, u64 target);
 
@@ -2801,7 +2801,7 @@ uvm_                      ← 顶层命名空间（UVM 驱动）
 **命名规则总结**：
 1. **Hook**：`uvm_<子系统>_<对象>_<动作>` 或 `uvm_<子系统>_<功能>_<时机>`
 2. **Kfunc**：`bpf_uvm_<子系统>_<对象>_<动作>`
-3. **CFI stub**：`uvm_gpu_ext__<完整hook名>`
+3. **CFI stub**：`gpu_mem_ops__<完整hook名>`
 
 ### 14.5 为什么需要 `pmm_` 中缀？
 
@@ -2840,13 +2840,13 @@ void uvm_pmm_gpu_mark_root_chunk_unused(...)  ← 已有的！
 | `on_chunk_unpin` | ❌ 缺少 uvm_ | `uvm_pmm_chunk_unpin` | `chunk_update_lists_locked` |
 | `on_chunk_populate` | ❌ 缺少 uvm_ | `uvm_pmm_chunk_populate` | `uvm_pmm_gpu_mark_root_chunk_used` |
 | `on_chunk_depopulate` | ❌ 缺少 uvm_ | `uvm_pmm_chunk_depopulate` | `uvm_pmm_gpu_mark_root_chunk_unused` |
-| `on_eviction_prepare` | ❌ 缺少 uvm_ | `uvm_pmm_eviction_prepare` | `pick_root_chunk_to_evict` |
+| `on_eviction_prepare` | ❌ 缺少 uvm_ | `gpu_evict_prepare` | `pick_root_chunk_to_evict` |
 
 #### Kfunc 命名（最终版）
 
 | 原设计 | 问题 | 最终推荐 |
 |-------|------|---------|
-| `bpf_uvm_chunk_move_head` | ⚠️ 缺少 pmm | `bpf_uvm_pmm_chunk_move_head` |
+| `bpf_uvm_chunk_move_head` | ⚠️ 缺少 pmm | `bpf_gpu_block_move_head` |
 | `bpf_uvm_chunk_next` | ⚠️ 缺少 pmm | `bpf_uvm_pmm_chunk_next` |
 | `bpf_uvm_chunk_resident_pages` | ⚠️ 缺少 pmm | `bpf_uvm_pmm_chunk_resident_pages` |
 | `bpf_uvm_timestamp_ns` | ✅ 通用工具 | `bpf_uvm_timestamp_ns` (保持) |
@@ -2857,8 +2857,8 @@ void uvm_pmm_gpu_mark_root_chunk_unused(...)  ← 已有的！
 
 ```c
 // 现有的 Prefetch hooks
-int (*uvm_prefetch_before_compute)(...);
-int (*uvm_prefetch_on_tree_iter)(...);
+int (*gpu_page_prefetch)(...);
+int (*gpu_page_prefetch_iter)(...);
 ```
 
 **格式**：`uvm_<子系统>_<时机>`
@@ -2870,7 +2870,7 @@ int (*uvm_prefetch_on_tree_iter)(...);
 int (*uvm_pmm_chunk_unpin)(...);         // uvm_<子系统>_<对象>_<动作>
 int (*uvm_pmm_chunk_populate)(...);
 int (*uvm_pmm_chunk_depopulate)(...);
-int (*uvm_pmm_eviction_prepare)(...);    // uvm_<子系统>_<功能>_<时机>
+int (*gpu_evict_prepare)(...);    // uvm_<子系统>_<功能>_<时机>
 ```
 
 **一致性**：✅ 都有 `uvm_<子系统>_` 前缀
@@ -2902,7 +2902,7 @@ int BPF_PROG(chunk_depopulate, uvm_pmm_gpu_t *pmm, u64 chunk_addr)
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
+SEC("struct_ops/gpu_evict_prepare")
 int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 {
     // LFU 策略：按频率排序
@@ -2910,7 +2910,7 @@ int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
     while (chunk) {
         u32 freq = get_frequency(chunk);
         // 调整位置...
-        bpf_uvm_pmm_chunk_move_tail(chunk);  // 使用 pmm_ 前缀的 kfunc
+        bpf_gpu_block_move_tail(chunk);  // 使用 pmm_ 前缀的 kfunc
         chunk = bpf_uvm_pmm_chunk_next(chunk);
     }
     return 0;
@@ -2927,10 +2927,10 @@ int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 #### 完整的 struct_ops 定义
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     /* ==================== Prefetch hooks (existing) ==================== */
-    int (*uvm_prefetch_before_compute)(...);
-    int (*uvm_prefetch_on_tree_iter)(...);
+    int (*gpu_page_prefetch)(...);
+    int (*gpu_page_prefetch_iter)(...);
     
     /* ==================== PMM LRU hooks (new) ==================== */
     
@@ -2955,7 +2955,7 @@ struct uvm_gpu_ext {
     // 触发：pick_root_chunk_to_evict()
     // 频率：~147K 次
     // 必需：实现自定义驱逐策略
-    int (*uvm_pmm_eviction_prepare)(uvm_pmm_gpu_t *pmm);
+    int (*gpu_evict_prepare)(uvm_pmm_gpu_t *pmm);
 };
 ```
 
@@ -2973,7 +2973,7 @@ struct uvm_gpu_ext {
 uvm_pmm_chunk_unpin        ← 完美
 uvm_pmm_chunk_populate     ← 完美
 uvm_pmm_chunk_depopulate   ← 完美
-uvm_pmm_eviction_prepare   ← 完美
+gpu_evict_prepare   ← 完美
 ```
 
 ---
@@ -2997,10 +2997,10 @@ uvm_pmm_eviction_prepare   ← 完美
 #### 现有 struct_ops 命名模式
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Prefetch 子系统
-    int (*uvm_prefetch_before_compute)(...);     // ← uvm_prefetch_ 前缀
-    int (*uvm_prefetch_on_tree_iter)(...);       // ← uvm_prefetch_ 前缀
+    int (*gpu_page_prefetch)(...);     // ← uvm_prefetch_ 前缀
+    int (*gpu_page_prefetch_iter)(...);       // ← uvm_prefetch_ 前缀
 };
 ```
 
@@ -3050,7 +3050,7 @@ int (*uvm_pmm_chunk_unpin)(...)  // ❌ 问题：
 | 候选名称 | 语义 | 优点 | 缺点 | 评分 |
 |---------|------|------|------|------|
 | **uvm_pmm_chunk_track** | 开始跟踪 chunk | ✅ 清晰表达"进入策略管理" | ⚠️ "track" 可能与监控混淆 | 7/10 |
-| **uvm_pmm_chunk_activate** | 激活 chunk 的可驱逐状态 | ✅ Linux 内核常用术语（lru_cache_activate_folio）<br>✅ 清晰表达状态转换 | ⚠️ 可能与"激活内存"混淆 | 8/10 |
+| **gpu_block_activate** | 激活 chunk 的可驱逐状态 | ✅ Linux 内核常用术语（lru_cache_activate_folio）<br>✅ 清晰表达状态转换 | ⚠️ 可能与"激活内存"混淆 | 8/10 |
 | **uvm_pmm_chunk_add** | 添加到驱逐列表 | ✅ 简洁直观<br>✅ 与 `list_add` 对应 | ❌ 太简单，未表达"状态变化" | 6/10 |
 | **uvm_pmm_chunk_evictable** | Chunk 变为可驱逐 | ✅ 准确描述结果状态<br>✅ 策略无关 | ⚠️ 名字较长 | 7/10 |
 | **uvm_pmm_chunk_ready** | Chunk 就绪（可被策略管理） | ✅ 中性、清晰 | ⚠️ "ready" 含义模糊（ready for what?） | 6/10 |
@@ -3075,7 +3075,7 @@ void folio_activate(struct folio *folio);
 
 | Linux 页缓存 | UVM Chunk | 对应关系 |
 |-------------|-----------|----------|
-| `folio_activate()` | `uvm_pmm_chunk_activate()` | ✅ 进入驱逐策略管理 |
+| `folio_activate()` | `gpu_block_activate()` | ✅ 进入驱逐策略管理 |
 | inactive list | pinned chunk | ❌ 不可驱逐 |
 | active list | unpinned chunk | ✅ 可驱逐（策略决定顺序） |
 
@@ -3099,19 +3099,19 @@ chunk_deactivate() →  chunk 退出策略管理（移除）
 #### 完整 struct_ops 定义
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     /* ==================== Prefetch hooks (existing) ==================== */
-    int (*uvm_prefetch_before_compute)(...);
-    int (*uvm_prefetch_on_tree_iter)(...);
+    int (*gpu_page_prefetch)(...);
+    int (*gpu_page_prefetch_iter)(...);
 
     /* ==================== PMM Eviction hooks (new) ==================== */
 
-    // ✅ 修正 1：uvm_pmm_chunk_activate（替代 uvm_pmm_chunk_unpin）
+    // ✅ 修正 1：gpu_block_activate（替代 uvm_pmm_chunk_unpin）
     // 语义：Chunk 进入驱逐策略管理（从 pinned 变为 unpinned）
     // 触发：chunk_update_lists_locked()
     // 频率：~170K 次
     // 策略：所有策略（LRU/FIFO/LFU/MRU/ARC）都可用
-    int (*uvm_pmm_chunk_activate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
+    int (*gpu_block_activate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
 
     // ✅ 修正 2：uvm_pmm_chunk_populate
     // 语义：Chunk 获得第一个页面（resident: 0→1）
@@ -3127,39 +3127,39 @@ struct uvm_gpu_ext {
     // 策略：必需，防止元数据泄漏
     int (*uvm_pmm_chunk_depopulate)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);
 
-    // ✅ 修正 4：uvm_pmm_eviction_prepare
+    // ✅ 修正 4：gpu_evict_prepare
     // 语义：准备驱逐时调整链表顺序
     // 触发：pick_root_chunk_to_evict()
     // 频率：~147K 次
     // 策略：必需，实现自定义驱逐顺序
-    int (*uvm_pmm_eviction_prepare)(uvm_pmm_gpu_t *pmm);
+    int (*gpu_evict_prepare)(uvm_pmm_gpu_t *pmm);
 };
 ```
 
 #### 对应的 CFI stubs
 
 ```c
-/* CFI stub naming: uvm_gpu_ext__<hook_name> */
+/* CFI stub naming: gpu_mem_ops__<hook_name> */
 
-static int uvm_gpu_ext__uvm_pmm_chunk_activate(
+static int gpu_mem_ops__gpu_block_activate(
     uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_populate(
+static int gpu_mem_ops__uvm_pmm_chunk_populate(
     uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_depopulate(
+static int gpu_mem_ops__uvm_pmm_chunk_depopulate(
     uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_eviction_prepare(
+static int gpu_mem_ops__gpu_evict_prepare(
     uvm_pmm_gpu_t *pmm)
 {
     return UVM_BPF_ACTION_DEFAULT;
@@ -3171,7 +3171,7 @@ static int uvm_gpu_ext__uvm_pmm_eviction_prepare(
 ```c
 /* kfunc naming: bpf_uvm_pmm_<action> */
 
-__bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(u64 chunk_addr);
+__bpf_kfunc void bpf_gpu_block_move_tail(u64 chunk_addr);
 __bpf_kfunc u64 bpf_uvm_pmm_chunk_next(u64 chunk_addr);
 __bpf_kfunc u64 bpf_uvm_pmm_list_first(enum uvm_pmm_list_type type);
 ```
@@ -3182,10 +3182,10 @@ __bpf_kfunc u64 bpf_uvm_pmm_list_first(enum uvm_pmm_list_type type);
 
 | Hook | 修订前（❌） | 修订后（✅） | 改进原因 |
 |------|------------|-------------|----------|
-| **Chunk 进入驱逐管理** | `uvm_pmm_chunk_unpin` | `uvm_pmm_chunk_activate` | ✅ `activate` 语义清晰（Linux 先例）<br>✅ 避免实现术语"unpin"<br>✅ 策略无关（适用所有算法） |
+| **Chunk 进入驱逐管理** | `uvm_pmm_chunk_unpin` | `gpu_block_activate` | ✅ `activate` 语义清晰（Linux 先例）<br>✅ 避免实现术语"unpin"<br>✅ 策略无关（适用所有算法） |
 | **Chunk 获得页面** | ~~无~~ | `uvm_pmm_chunk_populate` | ✅ 支持 S3-FIFO/ARC 等高级策略 |
 | **Chunk 失去页面** | ~~无~~ | `uvm_pmm_chunk_depopulate` | ✅ 必需：防止元数据泄漏 |
-| **准备驱逐** | ~~无~~ | `uvm_pmm_eviction_prepare` | ✅ 核心：实现自定义驱逐顺序 |
+| **准备驱逐** | ~~无~~ | `gpu_evict_prepare` | ✅ 核心：实现自定义驱逐顺序 |
 
 #### 核心改进点
 
@@ -3200,7 +3200,7 @@ __bpf_kfunc u64 bpf_uvm_pmm_list_first(enum uvm_pmm_list_type type);
 #### 示例：FIFO 策略实现（使用新命名）
 
 ```c
-SEC("struct_ops/uvm_pmm_chunk_activate")  // ← 策略无关命名
+SEC("struct_ops/gpu_block_activate")  // ← 策略无关命名
 int BPF_PROG(chunk_activate, uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     // FIFO：记录进入时间
@@ -3217,7 +3217,7 @@ int BPF_PROG(chunk_depopulate, uvm_pmm_gpu_t *pmm, u64 chunk_addr)
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")  // ← 策略无关命名
+SEC("struct_ops/gpu_evict_prepare")  // ← 策略无关命名
 int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 {
     // FIFO：最早进入的在链表头（已排序，无需调整）
@@ -3228,7 +3228,7 @@ int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 #### 示例：LFU 策略实现（同样的接口）
 
 ```c
-SEC("struct_ops/uvm_pmm_chunk_activate")  // ← 同样的 hook 名
+SEC("struct_ops/gpu_block_activate")  // ← 同样的 hook 名
 int BPF_PROG(chunk_activate, uvm_pmm_gpu_t *pmm, u64 chunk_addr)
 {
     // LFU：增加访问频率
@@ -3238,7 +3238,7 @@ int BPF_PROG(chunk_activate, uvm_pmm_gpu_t *pmm, u64 chunk_addr)
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")  // ← 同样的 hook 名
+SEC("struct_ops/gpu_evict_prepare")  // ← 同样的 hook 名
 int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 {
     // LFU：按频率排序（频率低的在链表头）
@@ -3255,11 +3255,11 @@ int BPF_PROG(eviction_prepare, uvm_pmm_gpu_t *pmm)
 
 | 优先级 | 命名 | 优点 | 缺点 | 推荐度 |
 |-------|------|------|------|-------|
-| **1** | `uvm_pmm_chunk_activate` | Linux 内核先例、语义最清晰、策略无关 | 无明显缺点 | ⭐⭐⭐⭐⭐ |
+| **1** | `gpu_block_activate` | Linux 内核先例、语义最清晰、策略无关 | 无明显缺点 | ⭐⭐⭐⭐⭐ |
 | **2** | `uvm_pmm_chunk_track` | 明确"开始跟踪"、策略无关 | "track" 可能与监控混淆 | ⭐⭐⭐⭐ |
 | **3** | `uvm_pmm_chunk_evictable` | 精确描述结果状态 | 名字较长 | ⭐⭐⭐⭐ |
 | **4** | `uvm_pmm_chunk_enter` | 清晰的状态转换 | 不如 activate 常见 | ⭐⭐⭐ |
 
-**最终推荐**：`uvm_pmm_chunk_activate` ⭐⭐⭐⭐⭐
+**最终推荐**：`gpu_block_activate` ⭐⭐⭐⭐⭐
 
 ---

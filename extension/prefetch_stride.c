@@ -130,7 +130,7 @@ int main(int argc, char **argv) {
     }
 
     /* Set configuration */
-    int config_fd = bpf_map__fd(skel->maps.config);
+    int config_fd = bpf_map__fd(skel->maps.policy_config);
     __u32 key;
 
     key = CONFIG_CONFIDENCE_THRESHOLD;

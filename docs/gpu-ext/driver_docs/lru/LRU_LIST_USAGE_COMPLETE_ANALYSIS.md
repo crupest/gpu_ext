@@ -323,7 +323,7 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
             list_move_tail(&root_chunk->chunk.list, &pmm->root_chunks.va_block_used);
 
             // ===== 添加 BPF hook =====
-            struct uvm_gpu_ext *ops;
+            struct gpu_mem_ops *ops;
             rcu_read_lock();
             ops = rcu_dereference(uvm_ops);
             if (ops && ops->uvm_lru_on_access) {
@@ -350,7 +350,7 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
 static uvm_gpu_root_chunk_t *pick_root_chunk_to_evict(uvm_pmm_gpu_t *pmm)
 {
     uvm_gpu_chunk_t *chunk;
-    struct uvm_gpu_ext *ops;
+    struct gpu_mem_ops *ops;
     int ret = 0;
 
     uvm_spin_lock(&pmm->list_lock);
@@ -470,10 +470,10 @@ void uvm_pmm_gpu_mark_root_chunk_used(...)
 **答案：只需要 2 个 hooks！** ⭐⭐⭐
 
 ```c
-struct uvm_gpu_ext {
+struct gpu_mem_ops {
     // Prefetch hooks
-    int (*uvm_prefetch_before_compute)(...);
-    int (*uvm_prefetch_on_tree_iter)(...);
+    int (*gpu_page_prefetch)(...);
+    int (*gpu_page_prefetch_iter)(...);
 
     // LRU hooks (最简方案)
     int (*uvm_lru_on_access)(uvm_pmm_gpu_t *pmm, u64 chunk_addr);

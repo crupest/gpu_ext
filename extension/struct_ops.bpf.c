@@ -8,8 +8,8 @@
 char _license[] SEC("license") = "GPL";
 
 /* Implement the struct_ops callbacks */
-SEC("struct_ops/uvm_bpf_test_trigger_kfunc")
-int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
+SEC("struct_ops/gpu_test_trigger")
+int BPF_PROG(gpu_test_trigger, const char *buf, int len)
 {
 	char read_buf[64] = {0};
 	int read_len = len < sizeof(read_buf) ? len : sizeof(read_buf) - 1;
@@ -17,10 +17,10 @@ int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
 	char substr[] = "GPU";
 	int result;
 
-	bpf_printk("BPF uvm_bpf_test_trigger_kfunc called with buffer length %d\n", len);
+	bpf_printk("BPF gpu_test_trigger called with buffer length %d\n", len);
 
 	/* Test the kfunc */
-	result = bpf_uvm_strstr(str, sizeof(str) - 1, substr, sizeof(substr) - 1);
+	result = bpf_gpu_strstr(str, sizeof(str) - 1, substr, sizeof(substr) - 1);
 	if (result != -1) {
 		bpf_printk("'%s' found in '%s' at index %d\n", substr, str, result);
 	} else {
@@ -45,6 +45,6 @@ int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
 
 /* Define the struct_ops map */
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops = {
-	.uvm_bpf_test_trigger_kfunc = (void *)uvm_bpf_test_trigger_kfunc,
+struct gpu_mem_ops uvm_ops = {
+	.gpu_test_trigger = (void *)gpu_test_trigger,
 };

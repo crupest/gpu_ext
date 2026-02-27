@@ -80,8 +80,8 @@ u64 addr = BPF_CORE_READ(chunk, address);
 ### 3.1 测试代码
 
 ```c
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -175,8 +175,8 @@ for (int i = 0; i < 128 && pos != head; i++) {
 
 | kfunc | 原因 | 难度 |
 |-------|------|------|
-| `bpf_uvm_pmm_chunk_move_head()` | ✅ 已有 | - |
-| `bpf_uvm_pmm_chunk_move_tail()` | ✅ 已有 | - |
+| `bpf_gpu_block_move_head()` | ✅ 已有 | - |
+| `bpf_gpu_block_move_tail()` | ✅ 已有 | - |
 | `bpf_uvm_list_move_before()` | ⚠️ 链表修改需要 kfunc (BPF 不能直接 `list_move`) | 可选 |
 
 **为什么 `move_before` 需要 kfunc?**
@@ -193,7 +193,7 @@ for (int i = 0; i < 128 && pos != head; i++) {
     u32 *freq = bpf_map_lookup_elem(&freq_map, &addr);
 
     if (freq && *freq < LOW_FREQ_THRESHOLD) {
-        bpf_uvm_pmm_chunk_move_head(chunk, head);  // Move to eviction end
+        bpf_gpu_block_move_head(chunk, head);  // Move to eviction end
     }
     pos = BPF_CORE_READ(pos, next);
 }

@@ -30,7 +30,7 @@ struct {
     __uint(max_entries, 8);
     __type(key, u32);
     __type(value, u64);
-} config SEC(".maps");
+} policy_config SEC(".maps");
 
 /* Per-PID statistics */
 struct {
@@ -67,7 +67,7 @@ struct {
 /* Helper: Get config value */
 static __always_inline u64 get_config_u64(u32 key)
 {
-    u64 *val = bpf_map_lookup_elem(&config, &key);
+    u64 *val = bpf_map_lookup_elem(&policy_config, &key);
     return val ? *val : 0;
 }
 
@@ -81,9 +81,9 @@ static __always_inline u32 get_prefetch_threshold_for_pid(u32 pid)
 
     /* Get high priority PID and its threshold */
     key = CONFIG_PRIORITY_PID;
-    high_pid_ptr = bpf_map_lookup_elem(&config, &key);
+    high_pid_ptr = bpf_map_lookup_elem(&policy_config, &key);
     key = CONFIG_PRIORITY_PARAM;
-    high_param_ptr = bpf_map_lookup_elem(&config, &key);
+    high_param_ptr = bpf_map_lookup_elem(&policy_config, &key);
 
     if (high_pid_ptr && high_param_ptr && *high_pid_ptr == pid) {
         return (u32)*high_param_ptr;
@@ -91,9 +91,9 @@ static __always_inline u32 get_prefetch_threshold_for_pid(u32 pid)
 
     /* Get low priority PID and its threshold */
     key = CONFIG_LOW_PRIORITY_PID;
-    low_pid_ptr = bpf_map_lookup_elem(&config, &key);
+    low_pid_ptr = bpf_map_lookup_elem(&policy_config, &key);
     key = CONFIG_LOW_PRIORITY_PARAM;
-    low_param_ptr = bpf_map_lookup_elem(&config, &key);
+    low_param_ptr = bpf_map_lookup_elem(&policy_config, &key);
 
     if (low_pid_ptr && low_param_ptr && *low_pid_ptr == pid) {
         return (u32)*low_param_ptr;
@@ -101,7 +101,7 @@ static __always_inline u32 get_prefetch_threshold_for_pid(u32 pid)
 
     /* Default threshold for other PIDs */
     key = CONFIG_DEFAULT_PARAM;
-    default_param_ptr = bpf_map_lookup_elem(&config, &key);
+    default_param_ptr = bpf_map_lookup_elem(&policy_config, &key);
     if (default_param_ptr) {
         return (u32)*default_param_ptr;
     }
@@ -198,8 +198,8 @@ static __always_inline u32 get_cached_owner_pid(void)
     return cached_pid ? *cached_pid : 0;
 }
 
-SEC("struct_ops/uvm_prefetch_before_compute")
-int BPF_PROG(uvm_prefetch_before_compute,
+SEC("struct_ops/gpu_page_prefetch")
+int BPF_PROG(gpu_page_prefetch,
              uvm_page_index_t page_index,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
@@ -212,14 +212,14 @@ int BPF_PROG(uvm_prefetch_before_compute,
                owner_tgid, page_index, threshold);
 
     /* Initialize result_region to empty */
-    bpf_uvm_set_va_block_region(result_region, 0, 0);
+    bpf_gpu_set_prefetch_region(result_region, 0, 0);
 
     /* Return ENTER_LOOP to let driver iterate tree and call on_tree_iter */
     return 2; // UVM_BPF_ACTION_ENTER_LOOP
 }
 
-SEC("struct_ops/uvm_prefetch_on_tree_iter")
-int BPF_PROG(uvm_prefetch_on_tree_iter,
+SEC("struct_ops/gpu_page_prefetch_iter")
+int BPF_PROG(gpu_page_prefetch_iter,
              uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
              uvm_va_block_region_t *max_prefetch_region,
              uvm_va_block_region_t *current_region,
@@ -247,7 +247,7 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
     }
 
     if (allowed) {
-        bpf_uvm_set_va_block_region(prefetch_region, first, outer);
+        bpf_gpu_set_prefetch_region(prefetch_region, first, outer);
         return 1; // Selected this region
     }
 
@@ -256,8 +256,8 @@ int BPF_PROG(uvm_prefetch_on_tree_iter,
 
 /* ============== EVICTION HOOKS ============== */
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -292,8 +292,8 @@ int BPF_PROG(uvm_pmm_chunk_activate,
     return 0;
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -333,7 +333,7 @@ int BPF_PROG(uvm_pmm_chunk_used,
 
     /* Move tail only when access count reaches decay threshold */
     if (count % decay_factor == 0) {
-        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        bpf_gpu_block_move_tail(chunk, list);
         if (stats) {
             __sync_fetch_and_add(&stats->policy_allow, 1);
         }
@@ -348,8 +348,8 @@ int BPF_PROG(uvm_pmm_chunk_used,
     return 1; /* BYPASS - don't let kernel do LRU move */
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -396,19 +396,19 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
 }
 
 /* Dummy implementation for test trigger */
-SEC("struct_ops/uvm_bpf_test_trigger_kfunc")
-int BPF_PROG(uvm_bpf_test_trigger_kfunc, const char *buf, int len)
+SEC("struct_ops/gpu_test_trigger")
+int BPF_PROG(gpu_test_trigger, const char *buf, int len)
 {
     return 0;
 }
 
 /* Define the struct_ops map - includes both prefetch and eviction hooks */
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_prefetch_eviction_pid = {
-    .uvm_bpf_test_trigger_kfunc = (void *)uvm_bpf_test_trigger_kfunc,
-    .uvm_prefetch_before_compute = (void *)uvm_prefetch_before_compute,
-    .uvm_prefetch_on_tree_iter = (void *)uvm_prefetch_on_tree_iter,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_prefetch_eviction_pid = {
+    .gpu_test_trigger = (void *)gpu_test_trigger,
+    .gpu_page_prefetch = (void *)gpu_page_prefetch,
+    .gpu_page_prefetch_iter = (void *)gpu_page_prefetch_iter,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };

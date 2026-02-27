@@ -1001,8 +1001,8 @@ void BPF_STRUCT_OPS(gpu_aware_stopping, struct task_struct *p) {
 
 ```c
 // 在 eviction_prepare 中:
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare, ...) {
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare, ...) {
     // 遍历 eviction 候选列表
     struct list_head *pos = BPF_CORE_READ(list, next);
     #pragma unroll
@@ -1020,7 +1020,7 @@ int BPF_PROG(uvm_pmm_eviction_prepare, ...) {
         }
 
         // 进程不在 CPU 上运行 → 优先驱逐其 GPU 内存
-        bpf_uvm_pmm_chunk_move_head(chunk, list);
+        bpf_gpu_block_move_head(chunk, list);
         pos = BPF_CORE_READ(pos, next);
     }
     return 0;

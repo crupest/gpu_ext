@@ -125,17 +125,17 @@ static __always_inline void increase_freq(u64 chunk_addr, uvm_gpu_chunk_t *chunk
     // 这样能保证大致的顺序：低频在 HEAD，高频在 TAIL
     // 但同频率内的顺序是 LRU（最近访问的在后面）
     //
-    // TODO: 需要新 kfunc bpf_uvm_pmm_chunk_insert_after() 才能做严格排序
+    // TODO: 需要新 kfunc bpf_gpu_block_insert_after() 才能做严格排序
 
     if (new_freq > old_freq) {
         // 频率增加了，移到 TAIL（让更高频的有机会在前面）
-        bpf_uvm_pmm_chunk_move_tail(chunk, list);
+        bpf_gpu_block_move_tail(chunk, list);
     }
     // 频率没变 -> 不移动（保持原位）
 }
 
-SEC("struct_ops/uvm_pmm_chunk_activate")
-int BPF_PROG(uvm_pmm_chunk_activate,
+SEC("struct_ops/gpu_block_activate")
+int BPF_PROG(gpu_block_activate,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -154,13 +154,13 @@ int BPF_PROG(uvm_pmm_chunk_activate,
     }
 
     // 新 chunk 是最低频，放在 HEAD（容易被 evict）
-    bpf_uvm_pmm_chunk_move_head(chunk, list);
+    bpf_gpu_block_move_head(chunk, list);
 
     return 1; // BYPASS
 }
 
-SEC("struct_ops/uvm_pmm_chunk_used")
-int BPF_PROG(uvm_pmm_chunk_used,
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
              uvm_pmm_gpu_t *pmm,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
@@ -173,8 +173,8 @@ int BPF_PROG(uvm_pmm_chunk_used,
     return 1; // BYPASS
 }
 
-SEC("struct_ops/uvm_pmm_eviction_prepare")
-int BPF_PROG(uvm_pmm_eviction_prepare,
+SEC("struct_ops/gpu_evict_prepare")
+int BPF_PROG(gpu_evict_prepare,
              uvm_pmm_gpu_t *pmm,
              struct list_head *va_block_used,
              struct list_head *va_block_unused)
@@ -213,11 +213,11 @@ int BPF_PROG(uvm_pmm_eviction_prepare,
 
 /* Define the struct_ops map */
 SEC(".struct_ops")
-struct uvm_gpu_ext uvm_ops_lfu_clean = {
-    .uvm_bpf_test_trigger_kfunc = (void *)NULL,
-    .uvm_prefetch_before_compute = (void *)NULL,
-    .uvm_prefetch_on_tree_iter = (void *)NULL,
-    .uvm_pmm_chunk_activate = (void *)uvm_pmm_chunk_activate,
-    .uvm_pmm_chunk_used = (void *)uvm_pmm_chunk_used,
-    .uvm_pmm_eviction_prepare = (void *)uvm_pmm_eviction_prepare,
+struct gpu_mem_ops uvm_ops_lfu_clean = {
+    .gpu_test_trigger = (void *)NULL,
+    .gpu_page_prefetch = (void *)NULL,
+    .gpu_page_prefetch_iter = (void *)NULL,
+    .gpu_block_activate = (void *)gpu_block_activate,
+    .gpu_block_access = (void *)gpu_block_access,
+    .gpu_evict_prepare = (void *)gpu_evict_prepare,
 };
