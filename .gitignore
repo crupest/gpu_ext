@@ -51,3 +51,4 @@ extension/sched_gpu_aware
 
 # Presentation build output
 docs/presentation/*/dist/
+extension/prefetch_proactive_layer

@@ -60,6 +60,8 @@ static void read_stats(struct sched_gpu_aware_bpf *skel, __u64 *out)
 	}
 }
 
+#define MAX_GPU_PIDS 16
+
 int main(int argc, char **argv)
 {
 	struct sched_gpu_aware_bpf *skel;
@@ -69,13 +71,23 @@ int main(int argc, char **argv)
 	int gpu_map_fd = -1;
 	int workers_map_fd = -1;
 	int err = 0;
+	__u32 gpu_pids[MAX_GPU_PIDS];
+	int n_gpu_pids = 0;
 
 	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
 
-	while ((opt = getopt(argc, argv, "t:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "p:t:vh")) != -1) {
 		switch (opt) {
+		case 'p':
+			if (n_gpu_pids < MAX_GPU_PIDS) {
+				gpu_pids[n_gpu_pids++] = (__u32)atoi(optarg);
+			} else {
+				fprintf(stderr, "Too many -p PIDs (max %d)\n",
+					MAX_GPU_PIDS);
+			}
+			break;
 		case 't':
 			threshold = atoll(optarg);
 			break;
@@ -86,9 +98,10 @@ int main(int argc, char **argv)
 			fprintf(stderr,
 				"xCoord GPU-aware sched_ext scheduler.\n\n"
 				"Reads GPU state from %s (written by eviction_lfu_xcoord)\n"
-				"and boosts CPU scheduling priority for processes with high\n"
-				"GPU page fault rates.\n\n"
-				"Usage: %s [-v] [-t threshold]\n\n"
+				"and boosts CPU scheduling priority for GPU processes and\n"
+				"UVM fault handler threads.\n\n"
+				"Usage: %s [-v] [-t threshold] [-p PID ...]\n\n"
+				"  -p PID   GPU process PID to boost (can specify multiple)\n"
 				"  -t RATE  Fault rate threshold for boost (default: %d)\n"
 				"  -v       Print libbpf debug messages\n"
 				"  -h       Display this help and exit\n",
@@ -181,9 +194,28 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	/* Populate gpu_process_pids map with PIDs from -p flags */
+	if (n_gpu_pids > 0) {
+		int proc_fd = bpf_map__fd(skel->maps.gpu_process_pids);
+		for (int i = 0; i < n_gpu_pids; i++) {
+			__u32 val = 1;
+			err = bpf_map_update_elem(proc_fd, &gpu_pids[i],
+						  &val, BPF_ANY);
+			if (err) {
+				fprintf(stderr,
+					"WARNING: Failed to add PID %u: %s\n",
+					gpu_pids[i], strerror(-err));
+			} else {
+				printf("Registered GPU process PID %u for boosting\n",
+				       gpu_pids[i]);
+			}
+		}
+	}
+
 	printf("xCoord GPU-aware scheduler loaded!\n");
 	printf("  Fault rate boost threshold: %llu faults/sec\n",
 	       (unsigned long long)threshold);
+	printf("  GPU process PIDs: %d registered\n", n_gpu_pids);
 	printf("  GPU state map: %s\n",
 	       gpu_map_fd >= 0 ? "connected" : "not available (running blind)");
 	printf("  UVM worker map: %s\n",

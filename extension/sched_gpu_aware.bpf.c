@@ -38,6 +38,20 @@ struct {
 	__type(value, __u64);
 } uvm_worker_pids SEC(".maps");
 
+/*
+ * GPU process PIDs -- set by the userspace loader (-p PID).
+ * Maps GPU process TGIDs to boost flag (1 = boost).
+ * This directly boosts all threads of the GPU application,
+ * not just UVM kworker threads. Essential for workloads
+ * that fit in VRAM (no UVM paging during inference).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, XCOORD_MAX_GPU_PROCS);
+	__type(key, __u32);
+	__type(value, __u32);
+} gpu_process_pids SEC(".maps");
+
 /* Per-CPU statistics: [local, global, gpu_boosted, gpu_throttled] */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -59,6 +73,7 @@ static u64 vtime_now;
 volatile int exit_kind;
 
 #define SHARED_DSQ 0
+#define GPU_BOOST_DSQ 1
 
 /* Configurable via rodata */
 const volatile u64 fault_rate_boost_threshold = XCOORD_FAULT_RATE_HIGH;
@@ -71,6 +86,36 @@ static void stat_inc(u32 idx)
 		(*cnt_p)++;
 }
 
+/*
+ * is_gpu_task - Check if this task should receive GPU-aware boosting.
+ *
+ * Returns true if the task matches:
+ *   1. A directly registered GPU process PID (-p flag), OR
+ *   2. An active UVM worker thread (from gpu_ext tracking)
+ */
+static bool is_gpu_task(struct task_struct *p)
+{
+	u32 pid = p->tgid;
+	u32 *boost;
+	u64 *worker_ts;
+	u64 now;
+
+	/* Check direct GPU process registration */
+	boost = bpf_map_lookup_elem(&gpu_process_pids, &pid);
+	if (boost && *boost)
+		return true;
+
+	/* Check UVM worker thread tracking */
+	worker_ts = bpf_map_lookup_elem(&uvm_worker_pids, &pid);
+	if (worker_ts) {
+		now = bpf_ktime_get_ns();
+		if (now - *worker_ts < XCOORD_WORKER_TIMEOUT_NS)
+			return true;
+	}
+
+	return false;
+}
+
 s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
@@ -79,6 +124,18 @@ s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
+		/*
+		 * Don't fast-path GPU tasks to local DSQ — let them
+		 * go through enqueue() where the boost logic runs.
+		 * This is critical: without this, GPU tasks on idle
+		 * CPUs bypass the boost entirely.
+		 */
+		if (is_gpu_task(p)) {
+			/* Still use the selected CPU for cache warmth,
+			 * but don't insert — enqueue() will handle it */
+			return cpu;
+		}
+
 		stat_inc(STAT_LOCAL);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 	}
@@ -91,28 +148,20 @@ void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 pid = p->tgid;
 	u64 slice = SCX_SLICE_DFL;
 	u64 vtime;
-	u64 *worker_ts;
-	u64 now;
 
 	/*
-	 * Check if this task is an active UVM worker thread.
-	 * UVM page fault handlers run in kworker threads, not in the
-	 * user process itself. The gpu_ext side tracks which kernel
-	 * threads are actively doing UVM operations.
+	 * GPU task boosting — covers both:
+	 *   1. Direct GPU process PIDs (set by -p flag)
+	 *   2. Active UVM kworker threads (from gpu_ext tracking)
+	 *
+	 * Boosted tasks get ENQ_HEAD + longer timeslice to minimize
+	 * GPU kernel launch delay and UVM fault handler latency.
 	 */
-	worker_ts = bpf_map_lookup_elem(&uvm_worker_pids, &pid);
-	if (worker_ts) {
-		now = bpf_ktime_get_ns();
-		if (now - *worker_ts < XCOORD_WORKER_TIMEOUT_NS) {
-			/*
-			 * Active UVM worker: boost to head of queue
-			 * so page fault handling completes quickly.
-			 */
-			stat_inc(STAT_GPU_BOOSTED);
-			scx_bpf_dsq_insert(p, SHARED_DSQ, slice_boost_ns,
-					    enq_flags | SCX_ENQ_HEAD);
-			return;
-		}
+	if (is_gpu_task(p)) {
+		stat_inc(STAT_GPU_BOOSTED);
+		scx_bpf_dsq_insert(p, GPU_BOOST_DSQ, slice_boost_ns,
+				    enq_flags);
+		return;
 	}
 
 	/*
@@ -138,6 +187,8 @@ void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(gpu_aware_dispatch, s32 cpu, struct task_struct *prev)
 {
+	/* Drain GPU boost queue first (higher priority) */
+	scx_bpf_dsq_move_to_local(GPU_BOOST_DSQ);
 	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
@@ -159,7 +210,10 @@ void BPF_STRUCT_OPS(gpu_aware_enable, struct task_struct *p)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(gpu_aware_init)
 {
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	s32 ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	if (ret)
+		return ret;
+	return scx_bpf_create_dsq(GPU_BOOST_DSQ, -1);
 }
 
 void BPF_STRUCT_OPS(gpu_aware_exit, struct scx_exit_info *ei)

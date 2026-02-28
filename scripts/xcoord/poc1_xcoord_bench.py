@@ -48,11 +48,16 @@ DATASET_DIR = LLAMA_WORKLOAD_DIR / "datasets"
 DATASET_PATH = DATASET_DIR / "sharegpt_vicuna.json"
 DEFAULT_TOKENIZER = "Qwen/Qwen3-30B-A3B-FP8"
 
-# 120B model (from bench.py)
+# Model paths
 DEFAULT_MODEL_120B = (
     Path.home()
     / ".cache/llama.cpp"
     / "ggml-org_gpt-oss-120b-GGUF_gpt-oss-120b-mxfp4-00001-of-00003.gguf"
+)
+DEFAULT_MODEL_20B = (
+    Path.home()
+    / ".cache/llama.cpp"
+    / "ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"
 )
 
 # xCoord binaries
@@ -99,31 +104,43 @@ def verify_gpu_clean():
     return True
 
 
-def start_xcoord(server_pid, output_dir):
-    """Start xCoord GPU and CPU components. Returns dict of processes or None on failure."""
+def start_xcoord(server_pid, output_dir, skip_gpu_ext=False):
+    """Start xCoord GPU and CPU components. Returns dict of processes or None on failure.
+
+    Args:
+        server_pid: PID of the GPU server process to boost.
+        output_dir: Directory for log files.
+        skip_gpu_ext: If True, skip eviction_lfu_xcoord (for workloads that fit in VRAM).
+    """
     procs = {}
 
-    # GPU side: eviction_lfu_xcoord
-    gpu_log = open(output_dir / "xcoord_gpu.log", "w")
-    gpu_proc = subprocess.Popen(
-        ["sudo", str(EVICTION_XCOORD), "-p", str(server_pid), "-P", "1", "-d", "5"],
-        stdout=gpu_log, stderr=subprocess.STDOUT,
-    )
-    procs["gpu"] = (gpu_proc, gpu_log)
-    time.sleep(2)
+    if not skip_gpu_ext:
+        # GPU side: eviction_lfu_xcoord
+        gpu_log = open(output_dir / "xcoord_gpu.log", "w")
+        gpu_proc = subprocess.Popen(
+            ["sudo", str(EVICTION_XCOORD), "-p", str(server_pid), "-P", "1", "-d", "5"],
+            stdout=gpu_log, stderr=subprocess.STDOUT,
+        )
+        procs["gpu"] = (gpu_proc, gpu_log)
+        time.sleep(2)
 
-    # Verify pinned map exists (needs sudo to stat /sys/fs/bpf/)
-    check = subprocess.run(["sudo", "test", "-e", str(XCOORD_GPU_STATE_PIN)])
-    if check.returncode != 0:
-        print("  ERROR: gpu_state_map not pinned!", file=sys.stderr)
-        stop_xcoord(procs)
-        return None
-    print(f"  eviction_lfu_xcoord loaded (PID: {gpu_proc.pid})", file=sys.stderr)
+        # Verify pinned map exists (needs sudo to stat /sys/fs/bpf/)
+        check = subprocess.run(["sudo", "test", "-e", str(XCOORD_GPU_STATE_PIN)])
+        if check.returncode != 0:
+            print("  ERROR: gpu_state_map not pinned!", file=sys.stderr)
+            stop_xcoord(procs)
+            return None
+        print(f"  eviction_lfu_xcoord loaded (PID: {gpu_proc.pid})", file=sys.stderr)
+    else:
+        print("  Skipping eviction_lfu_xcoord (model fits in VRAM)", file=sys.stderr)
 
-    # CPU side: sched_gpu_aware
+    # CPU side: sched_gpu_aware (always needed)
+    # Pass server PID via -p for direct process boosting
+    sched_cmd = ["sudo", str(SCHED_GPU_AWARE), "-t", "1000",
+                 "-p", str(server_pid)]
     cpu_log = open(output_dir / "xcoord_cpu.log", "w")
     cpu_proc = subprocess.Popen(
-        ["sudo", str(SCHED_GPU_AWARE), "-t", "1000"],
+        sched_cmd,
         stdout=cpu_log, stderr=subprocess.STDOUT,
     )
     procs["cpu"] = (cpu_proc, cpu_log)
@@ -136,7 +153,8 @@ def start_xcoord(server_pid, output_dir):
     except Exception:
         print("  sched_ext state: unknown", file=sys.stderr)
 
-    print(f"  sched_gpu_aware loaded (PID: {cpu_proc.pid})", file=sys.stderr)
+    print(f"  sched_gpu_aware loaded (PID: {cpu_proc.pid}, boosting server PID: {server_pid})",
+          file=sys.stderr)
     return procs
 
 
@@ -185,7 +203,7 @@ def stop_stress(proc):
 
 
 def run_scenario(scenario, model, ctx, port, prompts, max_concurrency,
-                 request_rate, output_dir):
+                 request_rate, output_dir, skip_gpu_ext=False):
     """Run a single benchmark scenario. Returns result dict or None."""
     with_stress, with_xcoord = SCENARIOS[scenario]
 
@@ -271,7 +289,8 @@ def run_scenario(scenario, model, ctx, port, prompts, max_concurrency,
         # Start xCoord (after warmup, before stress)
         if with_xcoord:
             print("  Starting xCoord...", file=sys.stderr)
-            xcoord_procs = start_xcoord(server_proc.pid, output_dir)
+            xcoord_procs = start_xcoord(server_proc.pid, output_dir,
+                                        skip_gpu_ext=skip_gpu_ext)
             if xcoord_procs is None:
                 print("  ERROR: Failed to start xCoord", file=sys.stderr)
                 return None
@@ -280,6 +299,23 @@ def run_scenario(scenario, model, ctx, port, prompts, max_concurrency,
         if with_stress:
             print("  Starting CPU stress...", file=sys.stderr)
             stress_proc = start_stress()
+            time.sleep(2)
+
+        # Post-stress warmup: let scheduler stabilize under load
+        if with_xcoord and with_stress:
+            print("  Post-stress warmup (3 prompts, not counted)...", file=sys.stderr)
+            post_warmup_cmd = (
+                f"uv run --directory {VLLM_WORKLOAD_DIR} vllm bench serve "
+                f"--model {model_name} "
+                f"--tokenizer {DEFAULT_TOKENIZER} "
+                f"--dataset-name sharegpt "
+                f"--dataset-path {DATASET_PATH} "
+                f"--base-url http://127.0.0.1:{port} "
+                f"--num-prompts 3 "
+                f"--max-concurrency 1 "
+                f"--request-rate 0.5"
+            )
+            subprocess.run(post_warmup_cmd, shell=True, capture_output=True)
             time.sleep(2)
 
         # Run benchmark (same as server_bench.py)
@@ -396,9 +432,13 @@ def print_summary(results):
 def main():
     parser = argparse.ArgumentParser(
         description="POC-1: xCoord GPU->CPU Coordination benchmark")
-    parser.add_argument("--model", default=str(DEFAULT_MODEL_120B),
-                        help="Model path (default: 120B)")
-    parser.add_argument("--ctx", type=int, default=4096, help="Context size")
+    model_group = parser.add_mutually_exclusive_group()
+    model_group.add_argument("--model", default=None,
+                             help="Model path (explicit)")
+    model_group.add_argument("--model-20b", action="store_true",
+                             help="Use 20B model (~10GB, fits in VRAM)")
+    parser.add_argument("--ctx", type=int, default=None,
+                        help="Context size (default: 4096 for 120B, 65536 for 20B)")
     parser.add_argument("--port", type=int, default=8013, help="Server port")
     parser.add_argument("--prompts", type=int, default=20,
                         help="Number of ShareGPT prompts per scenario")
@@ -410,7 +450,24 @@ def main():
                         default=list(SCENARIOS.keys()),
                         choices=list(SCENARIOS.keys()),
                         help="Scenarios to run (default: all)")
+    parser.add_argument("--skip-gpu-ext", action="store_true",
+                        help="Skip eviction_lfu_xcoord (for models that fit in VRAM)")
     args = parser.parse_args()
+
+    # Model selection
+    if args.model_20b:
+        args.model = str(DEFAULT_MODEL_20B)
+        if args.ctx is None:
+            args.ctx = 65536
+        # 20B fits in VRAM — no UVM paging, skip gpu_ext by default
+        if not args.skip_gpu_ext:
+            args.skip_gpu_ext = True
+            print("  Note: auto-enabling --skip-gpu-ext for 20B model", file=sys.stderr)
+    else:
+        if args.model is None:
+            args.model = str(DEFAULT_MODEL_120B)
+        if args.ctx is None:
+            args.ctx = 4096
 
     # Prerequisites
     if not LLAMA_SERVER.exists():
@@ -425,7 +482,10 @@ def main():
         sys.exit(1)
     for xcoord_scenario in args.scenarios:
         if SCENARIOS[xcoord_scenario][1]:  # needs xCoord
-            for binary in [EVICTION_XCOORD, SCHED_GPU_AWARE]:
+            required = [SCHED_GPU_AWARE]
+            if not args.skip_gpu_ext:
+                required.append(EVICTION_XCOORD)
+            for binary in required:
                 if not binary.exists():
                     print(f"ERROR: {binary.name} not found at {binary}", file=sys.stderr)
                     print(f"Run: cd {REPO_ROOT / 'extension'} && make {binary.name}",
@@ -451,7 +511,7 @@ def main():
         result = run_scenario(
             scenario, args.model, args.ctx, args.port,
             args.prompts, args.max_concurrency, args.request_rate,
-            output_dir,
+            output_dir, skip_gpu_ext=args.skip_gpu_ext,
         )
         if result:
             results[scenario] = result
