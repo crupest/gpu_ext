@@ -1818,26 +1818,73 @@ Linux CFS 追求 CPU 公平性，但 GPU workload 有独特的 CPU-GPU 交互模
 
 | # | Workload | 配置 | Profiling 目标 | 优化策略 | 状态 |
 |---|----------|------|---------------|---------|------|
-| E1 | llama.cpp 120B (UVM) | sched_ext only, 无 stress | P1: fault handler 调度延迟 | S1/S3/S4 | ⏳ |
-| E2 | llama.cpp 120B (UVM) | gpu_ext + sched_ext, 无 stress | P1+P3: fault + pipeline | S1+S3 | ⏳ |
+| E1 | llama.cpp 120B (UVM) | sched_ext only, 无 stress | P1: fault handler 调度延迟 | ❌ 无改善空间 | ✅ profiled |
+| E2 | llama.cpp 120B (UVM) | gpu_ext + stress-ng | P1+P3: fault + pipeline | ❌ stress 无影响 | ✅ profiled |
 | E3 | vLLM 30B (UVM) | sched_ext / gpu_ext+sched_ext, 无 stress | 同 P1 | 验证通用性 | ⏳ |
-| E4 | llama.cpp 20B (no UVM) | sched_ext only, 无 stress | P2: kernel launch 抢占 | S2 | ⏳ |
+| E4 | llama.cpp 20B (no UVM) | sched_ext only, 无 stress | P2: kernel launch 抢占 | ❌ 无改善空间 | ✅ profiled |
 
-**E1: 120B + sched_ext only**
-- Baseline: CFS, pp=141.6, tg=49.9 tok/s
-- **先 Profile (P1)**: `chunk_trace` + `perf sched latency` 量化 UVM kworker 调度延迟
-- **再设计**: 如果 fault handler wakeup 延迟 >10µs → 实现 S1 (wakeup priority boost)
-- **再评估**: sched_gpu_aware boost llama-bench PID + UVM kworker, 对比 CFS
-- 每 token 107 次 fault × fault handler 调度延迟 → 乘数效应
+**E1: 120B + sched_ext only** ✅ Profiling 完成
+
+- Baseline: CFS, pp=137.59, tg=49.65 tok/s (更新值)
+- **Profiling 工具**: `nsys profile` (perf 不可用, chunk_trace kprobe 符号不匹配)
+- **Profiling 结果 (2026-02-28)**:
+
+  **Timeline** (nsys 有 ~19% overhead: pp=111.16, tg=40.25 tok/s):
+  - Model loading: 0-78.9s (~79s, 62.8GB H2D weight transfer)
+  - pp512: 79.8-83.3s (3.56s, 1922 GPU kernels)
+  - tg128: 83.7-88.1s (4.42s, 1971 GPU kernels)
+
+  **pp512 phase**:
+  - GPU: 95%+ utilization, UVM H2D=609K ops/32.2GB @20.1 GB/s, D2H=1.9K ops/3.9GB
+  - CPU: **99.9% ON-CPU**, 仅 50 次调度切换, OFF-CPU P50=9.9us
+  - CPU 调度 overhead: 5.1ms / 3550ms = **0.14%**
+
+  **tg128 phase** (per-token: 15.4 kernels/token, 258 MB H2D + 258 MB D2H):
+  - GPU: **99.8% utilization**, 仅 7ms idle gaps (DMA 与 compute 完全 overlap)
+  - CPU: **99.7% ON-CPU**, 109 次调度切换, OFF-CPU P50=167us, P99=324us
+  - CPU 调度 overhead: 14ms / 4210ms = **0.33%**
+
+  **结论: CPU scheduling 不是瓶颈** ❌ sched_ext 无法改善此场景
+  - 主线程几乎不被抢占 (99.7-99.9% ON-CPU)
+  - 调度延迟 P99 < 430us，已足够快
+  - GPU 是瓶颈: PCIe 带宽 (~20 GB/s) 限制了 UVM 迁移速率
+  - UVM 的 async migration 已将 DMA 与 GPU compute 有效 overlap
+
+- **设计决策**: 跳过 E1 的 sched_ext 单独评估（无 stress 下没有改善空间）
+- **转向**: E2 (gpu_ext + sched_ext + stress-ng) 才是 sched_ext 的真正价值场景
 - llama-bench pp=512 tg=128, 10 runs geometric mean
 
-**E2: 120B + gpu_ext + sched_ext (核心实验)**
-- Baseline: gpu_ext alone (always_max + cycle_moe) = pp=221.33, tg=88.79
-- **先 Profile (P1+P3)**: fault handler 延迟 + GPU idle gap (pipeline bubble)
-- **再设计**: 基于 P1+P3 数据，实现 S1 (fault boost) + 可能 S3 (pipeline-aware)
-- **再评估**: gpu_ext + sched_gpu_aware vs gpu_ext alone
-- 问题: 联合调度是否能进一步提升 tg？
-- 如果 yes → 论文核心贡献: "CPU-GPU 联合调度比单侧优化更好"
+**E2: 120B + gpu_ext + sched_ext (核心实验)** ✅ Profiling 完成
+
+- Baseline: gpu_ext alone (always_max + cycle_moe), pp=138.08, tg=47.98 tok/s
+- **Profiling 结果 (2026-02-28)**:
+
+  **stress-ng 24-core (matrixprod) 影响测试**:
+  | 配置 | pp | tg | 变化 |
+  |------|-----|----|------|
+  | gpu_ext, 无 stress | 138.08 | 47.98 | baseline |
+  | gpu_ext + stress-ng 24c | 137.37 | 47.29 | **-0.5% / -1.4%** |
+
+  **结论: stress-ng 对 120B UVM 影响可忽略** ❌ "联合优化"假设不成立
+  - 120B 是 **GPU-bound**，不是 CPU-bound
+  - GPU 95-99.8% 利用率，PCIe 带宽 (~20 GB/s) 是瓶颈
+  - CPU 抢占被 GPU pipeline 隐藏: 即使 OFF-CPU 增加 9x (14ms→123ms), tg 仅降 1.4%
+  - **sched_ext 对 120B UVM 无论有无 stress 都没有价值**
+
+  **nsys 调度对比** (tg128 phase):
+  |  | No stress | stress-ng |
+  |--|-----------|-----------|
+  | CPU ON-CPU | 99.7% | 97.2% |
+  | OFF-CPU P99 | 324us | 3055us |
+  | tg throughput | ~49.65 | ~47.29 |
+
+  **"CPU-GPU 联合调度比单侧优化更好" — 不成立** for batch inference:
+  - gpu_ext 单独已接近最优 (PCIe 瓶颈)
+  - sched_ext 在 GPU-bound 场景下无额外价值
+  - 原因: GPU pipeline 完全隐藏了 CPU scheduling 延迟
+
+- **设计决策**: 放弃 E2 "联合优化超越单侧"路线
+- **转向**: sched_ext 价值在 20B **serving** (CPU-bound) 场景（详见 POC-1 结果）
 
 **E3: vLLM 30B UVM**
 - vLLM 从未测过 xCoord
@@ -1847,13 +1894,33 @@ Linux CFS 追求 CPU 公平性，但 GPU workload 有独特的 CPU-GPU 交互模
 - 验证 xCoord 不只对 llama.cpp 有效
 - **在 E1/E2 最佳策略确定后做**
 
-**E4: 20B proactive (补充)**
-- 20B fit in VRAM，无 UVM
-- **先 Profile (P2)**: `gpu_sched_trace` + `analyze_preemption_impact.py` 量化 kernel launch 抢占
-- **再设计**: 如果 preemption penalty P99 > 1ms → 实现 S2 (preemption guard)
-- **再评估**: 如果 sched_ext 能让 TPOT < CFS baseline → 即使无 UVM 也有价值
+**E4: 20B proactive (补充)** ✅ Profiling 完成
 
-### 15.5 vs POC-1 的区别
+- 20B fit in VRAM，无 UVM
+- Baseline: pp=9827, tg=362 tok/s (with nsys: pp=9686, tg=357)
+- **Profiling 结果 (2026-02-28)**:
+
+  **Per-token breakdown** (tg128, cudaGraphLaunch span=358.6ms):
+  - Per-token total: P50=**2.79ms**, P90=2.80ms, Max=4.06ms
+  - GPU compute: ~0.40ms (14%)
+  - CPU work (sampling/logits/prep): ~2.40ms (**86%**)
+  - cudaGraphLaunch: ~22us (negligible)
+  - GPU idle between tokens: 0us (kernels fully packed within each graph)
+
+  **CPU scheduling during tg128**:
+  - **零有效抢占**: 仅 3 次调度切换, 全部 <12.4us
+  - ON-CPU: 100% during inference
+  - CFS 已足够好（无竞争时）
+
+  **结论: 与 E1 相同 — 无 CPU 竞争时 sched_ext 无法改善** ❌
+  - CPU work 主导 per-token time (86%), 但 CFS 不会抢占
+  - sched_ext 价值仅在有 stress-ng 或多租户时体现
+  - POC-1 已验证: stress-ng 下 TPOT 3.71→4.44ms (+20%), sched_ext 恢复至 3.72ms
+
+- **设计决策**: E4 单独评估不需要（无 stress 无改善）
+- **但 20B serving (c>1) 仍有价值**: 并发请求自身产生 CPU 竞争 → 待 E2 后评估
+
+### 15.5 vs POC-1 的区别 + Profiling 关键发现
 
 | 维度 | POC-1 (stress recovery) | 主动优化 (Profiling-First) |
 |------|------------------------|--------------------------|
@@ -1864,3 +1931,45 @@ Linux CFS 追求 CPU 公平性，但 GPU workload 有独特的 CPU-GPU 交互模
 | 适用性 | 需要干扰存在 | **任何 GPU workload** |
 | 关键 workload | 20B (无 UVM) | **120B (重度 UVM)** |
 | 关键引擎 | llama.cpp only | llama.cpp + **vLLM** |
+
+**⚠️ Profiling-First 关键发现 (2026-02-28)**:
+
+**Phase A 完成: E1/E2/E4 全部 profiled。结论如下:**
+
+**发现 1: 无 CPU 竞争时, CFS 已足够好, sched_ext 无法超越 baseline**
+- 120B UVM (E1): CPU ON-CPU 99.7%, 调度延迟 P99<430us, GPU 99.8% utilized
+- 20B no-UVM (E4): CPU ON-CPU 100%, 零有效抢占, per-token 86% 是 CPU sampling
+- **"主动优化"前提不成立**: 无竞争时 CFS 不会抢占 GPU 线程
+
+**发现 2: 120B UVM 是 GPU-bound, stress-ng 对其影响可忽略**
+- gpu_ext 无 stress: pp=138.08, tg=47.98
+- gpu_ext + stress-ng 24c: pp=137.37, tg=47.29 (-0.5% / -1.4%)
+- 原因: GPU pipeline 隐藏 CPU scheduling 延迟, PCIe 带宽是真正瓶颈
+- **E2 "联合优化超越单侧" 假设不成立**: sched_ext 对 GPU-bound 场景无额外价值
+
+**发现 3: sched_ext 唯一有效场景 = 20B serving + CPU 竞争 (POC-1)**
+- 20B per-token 86% CPU work → CPU 抢占直接增加 TPOT
+- stress-ng: TPOT +20% → sched_ext: 完全恢复
+- 这是 **防御性** 优化 (恢复到 baseline), 不是 **主动** 优化
+
+**⚠️ 这推翻了原始论文架构的核心前提**:
+- ~~"CPU-GPU 联合调度比单侧优化更好"~~ → 不成立 for batch inference
+- ~~"主动协调超越 baseline"~~ → 不成立 (CFS 已足够好)
+- ~~"120B UVM 是 sched_ext 的主战场"~~ → 不成立 (GPU-bound)
+
+**论文方向必须重新评估**:
+- 选项 A: 聚焦 **serving** 场景 (20B/30B, 高并发, 多租户)
+  - sched_ext 在 serving 有价值 (保护 tail latency)
+  - gpu_ext 在 UVM 有价值 (prefetch/eviction)
+  - 但两者作用于不同场景，"联合"贡献有限
+- 选项 B: 深化 **gpu_ext alone** 的贡献 (不依赖 sched_ext)
+  - always_max prefetch 已有 +57-70% 提升
+  - 可扩展 gpu_ext 到更多 workload (FAISS, GNN, vLLM)
+- 选项 C: 放弃 xCoord，转向 gpu_ext-only 论文
+  - gpu_ext 贡献已足够: 5 个 BPF hooks, 20+ 策略, 4 workloads
+  - 不需要 sched_ext 的"协调"故事
+
+**nsys profiling 数据位置**:
+- E1 (120B no-stress): `/tmp/xcoord_profiling/120b_nsys.sqlite`
+- E2 (120B + stress): `/tmp/xcoord_profiling/e2_120b/120b_stress_nsys.sqlite`
+- E4 (20B no-stress): `/tmp/xcoord_profiling/e4_20b/20b_nsys.sqlite`
