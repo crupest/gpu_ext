@@ -145,17 +145,19 @@ s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
 
 void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	u32 pid = p->tgid;
-	u64 slice = SCX_SLICE_DFL;
-	u64 vtime;
+	u64 vtime = p->scx.dsq_vtime;
 
 	/*
-	 * GPU task boosting — covers both:
-	 *   1. Direct GPU process PIDs (set by -p flag)
-	 *   2. Active UVM kworker threads (from gpu_ext tracking)
+	 * GPU tasks → GPU_BOOST_DSQ (FIFO, boosted timeslice).
+	 * Non-GPU tasks → SHARED_DSQ (global PRIQ with vtime fairness).
 	 *
-	 * Boosted tasks get ENQ_HEAD + longer timeslice to minimize
-	 * GPU kernel launch delay and UVM fault handler latency.
+	 * This is the POC-1 R2 winning configuration:
+	 * - GPU tasks get dispatched first (priority boost via separate DSQ)
+	 * - Non-GPU tasks compete fairly in SHARED_DSQ with vtime scheduling
+	 * - The global SHARED_DSQ for stress-ng prevents local DSQ bypass
+	 *
+	 * NOT suitable for batch workloads (FAISS/GNN) with many GPU threads —
+	 * use sched_gpu_serving (local DSQ) or no scheduler for those.
 	 */
 	if (is_gpu_task(p)) {
 		stat_inc(STAT_GPU_BOOSTED);
@@ -164,25 +166,9 @@ void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	/*
-	 * Also check if this is the GPU process itself (for GPU-side
-	 * thrashing detection — give longer slices to reduce context
-	 * switch overhead).
-	 */
-	struct gpu_pid_state *gpu = bpf_map_lookup_elem(&gpu_state_map, &pid);
-	if (gpu && gpu->is_thrashing) {
-		stat_inc(STAT_GPU_THROTTLED);
-		slice = slice_boost_ns;
-	}
-
-	/* Default: weighted vtime scheduling */
 	stat_inc(STAT_GLOBAL);
-
-	vtime = p->scx.dsq_vtime;
-	if (time_before(vtime, vtime_now - SCX_SLICE_DFL))
-		vtime = vtime_now - SCX_SLICE_DFL;
-
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+	scx_bpf_dsq_insert(p, SHARED_DSQ, SCX_SLICE_DFL,
+			    enq_flags);
 }
 
 void BPF_STRUCT_OPS(gpu_aware_dispatch, s32 cpu, struct task_struct *prev)

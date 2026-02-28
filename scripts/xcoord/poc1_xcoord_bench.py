@@ -60,9 +60,10 @@ DEFAULT_MODEL_20B = (
     / "ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"
 )
 
-# xCoord binaries
+# xCoord binaries (default; can be overridden via --scheduler)
 EVICTION_XCOORD = REPO_ROOT / "extension" / "eviction_lfu_xcoord"
 SCHED_GPU_AWARE = REPO_ROOT / "extension" / "sched_gpu_aware"
+SCHED_GPU_SERVING = REPO_ROOT / "extension" / "sched_gpu_serving"
 
 # xCoord pinned map paths
 XCOORD_GPU_STATE_PIN = Path("/sys/fs/bpf/xcoord_gpu_state")
@@ -81,10 +82,12 @@ SCENARIOS = {
 
 def cleanup_xcoord_stale():
     """Kill any stale xCoord BPF processes and clean pinned maps."""
-    # Kill stale eviction_lfu_xcoord processes
-    subprocess.run(["sudo", "pkill", "-f", "eviction_lfu_xcoord"], capture_output=True)
-    # Kill stale sched_gpu_aware processes
-    subprocess.run(["sudo", "pkill", "-f", "sched_gpu_aware"], capture_output=True)
+    # Use pkill -x (exact process name match) to avoid killing ourselves.
+    # pkill -f matches the full command line and would kill this python script
+    # if the scheduler name appears as an argument.
+    for name in ["eviction_lfu_xcoord", "sched_gpu_aware", "sched_gpu_serving",
+                 "sched_gpu_minimal"]:
+        subprocess.run(["sudo", "pkill", "-x", name], capture_output=True)
     time.sleep(1)
     # Remove stale pinned maps
     for pin in [XCOORD_GPU_STATE_PIN, XCOORD_UVM_WORKERS_PIN]:
@@ -104,7 +107,7 @@ def verify_gpu_clean():
     return True
 
 
-def start_xcoord(server_pid, output_dir, skip_gpu_ext=False):
+def start_xcoord(server_pid, output_dir, skip_gpu_ext=False, sched_binary=None):
     """Start xCoord GPU and CPU components. Returns dict of processes or None on failure.
 
     Args:
@@ -134,10 +137,12 @@ def start_xcoord(server_pid, output_dir, skip_gpu_ext=False):
     else:
         print("  Skipping eviction_lfu_xcoord (model fits in VRAM)", file=sys.stderr)
 
-    # CPU side: sched_gpu_aware (always needed)
+    # CPU side: sched_ext scheduler (always needed)
     # Pass server PID via -p for direct process boosting
-    sched_cmd = ["sudo", str(SCHED_GPU_AWARE), "-t", "1000",
-                 "-p", str(server_pid)]
+    sched_bin = sched_binary or SCHED_GPU_AWARE
+    sched_cmd = ["sudo", str(sched_bin), "-p", str(server_pid)]
+    if str(sched_bin).endswith("sched_gpu_aware"):
+        sched_cmd += ["-t", "1000"]
     cpu_log = open(output_dir / "xcoord_cpu.log", "w")
     cpu_proc = subprocess.Popen(
         sched_cmd,
@@ -203,7 +208,7 @@ def stop_stress(proc):
 
 
 def run_scenario(scenario, model, ctx, port, prompts, max_concurrency,
-                 request_rate, output_dir, skip_gpu_ext=False):
+                 request_rate, output_dir, skip_gpu_ext=False, sched_binary=None):
     """Run a single benchmark scenario. Returns result dict or None."""
     with_stress, with_xcoord = SCENARIOS[scenario]
 
@@ -290,7 +295,8 @@ def run_scenario(scenario, model, ctx, port, prompts, max_concurrency,
         if with_xcoord:
             print("  Starting xCoord...", file=sys.stderr)
             xcoord_procs = start_xcoord(server_proc.pid, output_dir,
-                                        skip_gpu_ext=skip_gpu_ext)
+                                        skip_gpu_ext=skip_gpu_ext,
+                                        sched_binary=sched_binary)
             if xcoord_procs is None:
                 print("  ERROR: Failed to start xCoord", file=sys.stderr)
                 return None
@@ -452,6 +458,8 @@ def main():
                         help="Scenarios to run (default: all)")
     parser.add_argument("--skip-gpu-ext", action="store_true",
                         help="Skip eviction_lfu_xcoord (for models that fit in VRAM)")
+    parser.add_argument("--scheduler", type=Path,
+                        help="Path to sched_ext scheduler binary (default: sched_gpu_aware)")
     args = parser.parse_args()
 
     # Model selection
@@ -512,6 +520,7 @@ def main():
             scenario, args.model, args.ctx, args.port,
             args.prompts, args.max_concurrency, args.request_rate,
             output_dir, skip_gpu_ext=args.skip_gpu_ext,
+            sched_binary=args.scheduler,
         )
         if result:
             results[scenario] = result

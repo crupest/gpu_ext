@@ -1382,16 +1382,328 @@ POC-1 之前代码有三个 critical bug，导致 gpu_boosted=1/39021：
 
 5. **效果量在 2-7% 范围**: Throughput +2%，TPOT 改善 3-25%（取决于并发）。低并发下效果更显著。
 
-### 14.6 决策
+### 14.6 POC-1 的根本问题
 
-根据 10.7 决策树：
-- xCoord 在低并发下 TPOT 改善 25%（完全恢复），高并发改善 3-7%
-- 满足 ">5% 改善" 条件
-- **结论**: ✅ POC-1 通过，继续 POC-2
+**POC-1 只是一个高级 baseline，不具备论文 novelty。**
 
-### 14.7 下一步
+核心问题：
+1. **Blind boost = `nice -20`**: 只要是 GPU 进程就无条件 boost，等价于 `chrt -f 99` 或 `SCHED_FIFO`
+2. **GPU 状态信号完全未使用**: `gpu_state_map` 里有 `fault_rate`、`is_thrashing`，但 boost 判断完全没读——不管 GPU 忙不忙都一样 boost
+3. **CPU 干扰不真实**: stress-ng 纯 CPU 计算压力，和生产环境无关
+4. **场景不对应论文 claim**: 20B fit in VRAM 无 UVM paging → gpu_ext 完全不参与 → 没有 "跨子系统协调"
+5. **无自适应逻辑**: 不区分 prefill/decode、不区分 fault 强度、不区分 tenant 类型
 
-1. **增加 CPU 压力强度**: 当前 stress-ng 只是 CPU 计算压力。尝试 memory/IO 混合压力，可能放大 CPU-GPU 耦合效应。
-2. **Multi-tenant 场景**: 同时运行两个 GPU workload（inference + training），测试 xCoord 对 LC tenant 的保护效果。
-3. **120B UVM 场景**: 在有 UVM paging 的场景下测试，xCoord 同时 boost UVM kworker 线程。
-4. **CPU affinity 对比**: 与 `taskset`/`cgroup` CPU 隔离方案对比。
+**POC-1 的价值**: 验证了 sched_ext boost 机制本身 work（TPOT 恢复 25%），作为后续实验的 baseline。
+
+### 14.7 POC-1+ 计划：多 workload 验证 + 算法探索
+
+#### 14.7.1 实验策略
+
+**原则**:
+1. 先在单 tenant 场景逐个验证各 workload 的 CPU-GPU 耦合效应
+2. 寻找 workload-specific 的最优调度算法
+3. 每个实验控制在 ~10min 内完成
+4. 最终汇总到 multi-tenant 场景
+
+**单 tenant 实验矩阵**（每 workload 5 个 scenario）:
+
+| # | Scenario | 目的 |
+|---|----------|------|
+| B0 | Baseline (no stress) | 性能上界 |
+| B1 | + stress-ng | 量化 CPU 干扰影响 |
+| B2 | + stress + taskset | 证明静态隔离无效 |
+| B3 | + stress + blind boost (POC-1) | baseline 算法 |
+| B4 | + stress + GPU-aware boost | **新算法** |
+
+#### 14.7.2 候选算法
+
+| 算法 | 描述 | Novelty | 适用场景 |
+|------|------|---------|---------|
+| **A0: Blind Boost** | GPU PID → 无条件 boost 40ms | 无 (= nice -20) | POC-1 baseline |
+| **A1: Fault-Rate Adaptive** | fault_rate 越高 → slice 越长 | GPU 内存状态驱动 CPU 调度 | UVM workloads (GNN, FAISS, 120B) |
+| **A2: UVM Worker Escalation** | UVM kworker 优先级 > GPU 用户线程 | 区分 critical path | UVM fault-heavy |
+| **A3: Phase-Aware** | prefill 阶段 max boost, decode 阶段 normal | 推理阶段感知 | LLM inference |
+| **A4: Anti-Thrashing Throttle** | fault_rate > thrashing → 降低该 tenant CPU time | 反直觉的跨子系统反馈 | Multi-tenant 过度竞争 |
+| **A5: Weight-Proportional** | slice = f(fault_rate, gpu_utilization) | 连续自适应 | 通用 |
+
+#### 14.7.3 单 Workload 实验计划
+
+**W1: PyTorch GNN Training (UVM)**
+- 配置: 5-8M nodes, UVM mode, 5-10 epochs (~10min)
+- 特点: 有 UVM paging → gpu_ext 产生 fault_rate 信号 → 可测试 A1/A2
+- Metric: epoch time (s)
+
+**W2: FAISS Vector Search (UVM)**
+- 配置: SIFT10M-20M, index build + search
+- 特点: 批处理 + 搜索阶段 → 可测试 A3 (phase-aware)
+- Metric: add time, search time (s)
+
+**W3: llama.cpp 20B Inference (no UVM)**
+- 配置: 20 prompts, concurrency=4 (~5min)
+- 特点: 无 UVM，纯 CPU-GPU kernel launch latency
+- Metric: TPOT, TTFT, throughput
+
+**W4: Multi-Tenant (W1 + W3 同时)**
+- LC: llama.cpp 20B serving
+- BE: PyTorch GNN UVM training
+- 特点: 自然 CPU 竞争（不需要 stress-ng）+ GPU 内存竞争
+- Metric: LC TPOT/TTFT + BE epoch time
+- 算法: A4 (tenant-differentiated) + A1 (fault-adaptive)
+
+#### 14.7.4 新实验维度：无 stress 主动优化
+
+**核心假设**: 即使没有外部 CPU 干扰，xCoord 也可能改善性能：
+- UVM fault handler（kworker）在默认 CFS 下可能排在其他系统线程后面
+- GPU kernel launch 需要 CPU 线程提交，CFS 的 fair share 可能引入不必要的延迟
+- 主动 boost GPU 进程 = 减少 CPU→GPU 路径上的调度延迟
+
+**如果验证成功**，这是比 "recover from interference" 更强的 novelty：
+- "xCoord 不只是防御性工具，而是主动降低 CPU-GPU 交互延迟的协调机制"
+- 类比：DPDK 不只是在有干扰时保护网络，而是主动降低网络延迟
+
+**新增 scenario B5**: baseline + xCoord boost (无 stress)——如果 B5 < B0，说明主动优化有效。
+
+#### 14.7.5 执行顺序
+
+1. **立即**: W1 (GNN UVM) — 5 scenarios + B5 无 stress 优化
+2. **然后**: W2 (FAISS UVM) — 同上
+3. **然后**: W3 (llama 20B) — 同上
+4. **最后**: W4 (Multi-Tenant) — 综合场景
+
+#### 14.7.6 实验记录
+
+**W1: GNN UVM (5M nodes, 5 epochs, warmup=1)**
+
+Round 1 (2026-02-27): B0/B1/B2
+
+| Scenario | Avg Epoch (s) | Median (s) | Duration (s) | vs Baseline |
+|----------|--------------|------------|-------------|-------------|
+| B0 baseline | 34.39 | 34.38 | 225.7 | - |
+| B1 stress | 36.03 | 36.00 | 237.5 | +4.8% |
+| B2 stress+taskset | 36.43 | 36.64 | 242.1 | +5.9% |
+
+**发现**: stress 导致 4.8% 退化。taskset 比 plain stress 更差（+5.9%），因为限制了 UVM kworker 可用核心。
+
+Round 2 (2026-02-28): B3/B4（旧版 scheduler，使用 SHARED_DSQ vtime 调度）
+
+| Scenario | Avg Epoch (s) | Median (s) | Duration (s) | vs Baseline |
+|----------|--------------|------------|-------------|-------------|
+| B3 stress+blind_boost (旧) | **82.10** | 82.25 | 539.4 | **+138.7%** |
+| B4 stress+gpuext+boost (旧) | **53.20** | 52.99 | 348.0 | **+54.7%** |
+
+**重大发现: sched_ext overhead 导致灾难性退化！**
+- B3 (sched_ext + stress) 比 B1 (CFS + stress) 慢 **2.3x** (82.10 vs 36.03)
+- 原因: 所有 24 个 stress-ng 线程都经过 BPF enqueue/dispatch 路径，每次 2 个 hash map 查找 + vtime 计算。CFS 是 O(1)，sched_ext 对非 GPU 任务开销太大
+- B4 比 B3 好 35%（53.20 vs 82.10），说明 gpu_ext eviction 策略本身在帮助 UVM 页管理
+
+**修复**: 非 GPU 任务直接走 SCX_DSQ_LOCAL（跳过 vtime 调度），只对 GPU 任务使用 GPU_BOOST_DSQ。这样非 GPU 任务获得类 CFS 的低开销调度。
+
+Round 3 (2026-02-28): 优化后 scheduler（非 GPU 任务 → SCX_DSQ_LOCAL）
+
+| Scenario | Avg Epoch (s) | Median (s) | Duration (s) | vs Baseline |
+|----------|--------------|------------|-------------|-------------|
+| B0 baseline (re-run) | 34.40 | 34.40 | 225.8 | - |
+| B3 stress+blind_boost (优化) | 40.05 | **35.76** | 791.7 | avg +16.4%, **median +4.0%** |
+
+**sched_ext stats**: local=3,876,217 global=985,086 gpu_boosted=23,496 (0.5% of dispatches)
+
+**重要发现**:
+- **Median epoch = 35.76s** ≈ B1 stress (36.03s)。优化后 scheduler 在稳态下**不再增加额外开销**！
+- **Avg 被第一个 epoch 拖高**: epoch_times = [**57.86**, 35.41, 35.76, 35.37, 35.83]
+  - 第 1 epoch 57.86s（sched_ext 启动 + stress-ng 启动 + 初始 UVM 页分配）
+  - 第 2-5 epoch 平均 35.59s ≈ CFS+stress 水平
+- **Duration 异常**: 791.7s 远超 5×40s=200s。额外 ~590s 可能是 xCoord 启动/GPU PID 等待时间
+- **SCX_DSQ_LOCAL 优化成功**: 从旧版 82.10s (2.3x baseline) 降到 median 35.76s (≈baseline)
+- **但 avg 40.05s 仍高于 B1 36.03s**: 第一个 epoch 的 sched_ext 冷启动开销需要解决
+
+Round 4 (2026-02-28): B5 无 stress + xCoord boost
+
+| Scenario | Avg Epoch (s) | Median (s) | Duration (s) | vs Baseline |
+|----------|--------------|------------|-------------|-------------|
+| B5 no stress + boost | 35.44 | 35.40 | 232.3 | **+3.0%** |
+
+**sched_ext stats**: local=1,334,535 global=29,073 gpu_boosted=4,043
+
+**结论: xCoord 主动优化对 GNN UVM 无效，反而增加 3% 开销！**
+- epoch_times = [35.40, 35.48, 35.39, 35.67, 35.26] — 无冷启动问题
+- sched_ext 本身的 overhead (~3%) > CPU stress 恢复 (~2%)
+- 无 stress 时 scheduling decisions 少 (local=1.3M vs stress=3.9M)，但 overhead 仍存在
+
+**W1 GNN 汇总**:
+
+| Scenario | Avg (s) | Median (s) | vs B0 | 说明 |
+|----------|---------|-----------|-------|------|
+| B0 baseline (CFS) | 34.39 | 34.38 | - | 性能上界 |
+| B1 stress (CFS) | 36.03 | 36.00 | +4.8% | CPU 干扰 |
+| B2 stress+taskset | 36.43 | 36.64 | +5.9% | 静态隔离更差 |
+| B3 stress+boost (旧 vtime) | 82.10 | 82.25 | +138.7% | sched_ext vtime overhead 灾难 |
+| B4 stress+gpuext+boost (旧) | 53.20 | 52.99 | +54.7% | gpu_ext 帮助但 vtime 仍在 |
+| B3 stress+boost (优化 local) | 40.05 | **35.76** | median +4.0% | 稳态 ≈ CFS+stress |
+| B5 no stress+boost | 35.44 | 35.40 | **+3.0%** | 主动优化无效 |
+
+**W1 结论: GNN UVM 不是 xCoord 的理想 workload。**
+- CPU stress 仅导致 4.8% 退化 → xCoord 最多恢复 4.8%
+- sched_ext 本身开销 ~3% → net benefit ≈ 0
+- 原因: GNN 是 compute-bound (22.5GB UVM on 32GB GPU)，UVM 页管理不是瓶颈
+- **需要 CPU-GPU coupling 更强的 workload**
+
+下一步: W2 FAISS 或 W3 llama.cpp 20B (POC-0 确认 11.7% coupling)
+
+---
+
+**W2: FAISS SIFT100M UVM (IVF4096,Flat, nprobe=1,4,16)**
+
+Round 1 (2026-02-28): B0 warm cache / B1 stress / B3 多个 scheduler 变体
+
+| Scenario | add (s) | np=1 (s) | np=4 (s) | np=16 (s) | Total (s) | add vs B0 |
+|----------|---------|----------|----------|-----------|-----------|-----------|
+| B0 baseline (CFS, warm) | 71.38 | 5.36 | 14.43 | 56.87 | 149.62 | - |
+| B1 stress (CFS) | 85.42 | 5.38 | 14.07 | 55.18 | 162.33 | **+19.7%** |
+| B5 sched_ext (no stress) | 72.60 | 5.27 | 14.33 | 56.39 | 150.18 | +1.7% |
+| B3v1 stress+global_DSQ+40ms | 331.56 | 13.45 | 40.82 | 114.87 | 503.48 | **+364.5%** |
+| B3v2 stress+local_DSQ+40ms | 190.42 | 6.16 | 14.08 | 66.79 | 279.62 | **+166.8%** |
+| B3v3 stress+local_DSQ+default | 142.70 | 5.81 | 16.46 | 89.14 | 256.28 | **+100.0%** |
+
+**关键发现**:
+1. **CPU stress 对 FAISS add 阶段影响大**: +19.7%（比 GNN 的 4.8% 大 4 倍）→ FAISS 更适合 xCoord
+2. **search 阶段不受 CPU stress 影响**: GPU-bound（nprobe=1/4 几乎无变化）
+3. **sched_ext 无 stress 时开销 ≈ 0**: B5 vs B0 仅 +1.7%
+4. **sched_ext + stress = 灾难**: 即使是最优的 B3v3（local DSQ + default slice）也比 B1 (CFS) 慢 67%
+
+**sched_ext 变体性能分析**:
+
+| 变体 | 问题 | add vs B1 |
+|------|------|-----------|
+| B3v1: global GPU_BOOST_DSQ | 24 个 OpenMP 线程全序列化到 1 个全局 DSQ | +288% |
+| B3v2: local DSQ + 40ms | 40ms 时间片阻碍 OpenMP barrier 同步 | +123% |
+| B3v3: local DSQ + default | is_gpu_task() hash 查找 + vtime_now 缓存行抖动 | +67% |
+
+**根因分析**: sched_ext 在高 CPU contention 下性能远差于 CFS
+- **无 stress**: sched_ext 开销仅 +1.7%（可忽略）
+- **有 stress (24核)**: sched_ext 额外增加 67-288% 开销
+- 原因 1: `running()`/`stopping()` 的全局 `vtime_now` 变量导致 24 核缓存行竞争
+- 原因 2: 高 contention 时所有任务走 enqueue 路径（select_cpu 无空闲 CPU 快路径）
+- 原因 3: 每次 dispatch 尝试 drain 两个空的全局 DSQ
+
+**B3-minimal (sched_gpu_minimal: 移除 running/stopping/enable/dispatch)**:
+
+| Scenario | add (s) | np=1 (s) | np=16 (s) | Total (s) | add vs B0 |
+|----------|---------|----------|-----------|-----------|-----------|
+| B3-minimal | **613.04** | 5.25 | 56.92 | 692.12 | **+758.9%** |
+
+sched_ext stats: local=885,023 global=1,030,392 gpu_boosted=208
+
+**发现**: 移除核心 hooks (running/stopping) 反而更差！说明 sched_ext 需要这些 hooks 来正确跟踪任务状态。没有 stopping 回调，任务可能不会正确被抢占，导致 OpenMP barrier 无限等待。
+
+**W2 FAISS 结论**:
+
+sched_ext 在高 CPU contention + 多线程 workload 下引入的 overhead 远超 GPU boost 的收益：
+- **无 stress**: sched_ext 开销仅 +1.7%（可忽略）
+- **有 stress**: 最好的变体仍比 CFS+stress 慢 67%
+- **根本原因**: sched_ext 的 BPF 调度路径在高 contention 下效率远低于 CFS 原生路径
+  - CFS 有高度优化的锁和 O(1) 调度（红黑树）
+  - sched_ext 每次调度都要经过 BPF function call + map lookups
+  - 对多线程 barrier-synchronized workload (OpenMP/FAISS) 影响特别大
+
+**xCoord workload 适配矩阵**:
+
+| Workload 类型 | CPU 线程数 | 同步模式 | sched_ext 影响 | xCoord 效果 |
+|--------------|----------|---------|---------------|------------|
+| LLM serving (llama.cpp) | 少 (~4-8) | 异步 | **低** | **✅ 有效** (TPOT 完全恢复: 4.44→3.72ms) |
+| GNN training (PyTorch) | 中 (~8-12) | GPU-sync | **中** (+3%) | **≈ 0** (stress 仅 +4.8%) |
+| Vector search (FAISS) | 多 (24+) | barrier | **高** (+67-759%) | **❌ 有害** |
+
+**下一步**: 聚焦 llama.cpp serving（POC-1 已证明有效），用优化后的 scheduler (local DSQ, no global DSQ contention) 重新验证 + 尝试 GPU-aware 算法
+
+---
+
+**W3: llama.cpp 20B Serving — sched_gpu_serving vs sched_gpu_aware**
+
+测试 sched_gpu_serving (全局 GPU_BOOST_DSQ + 40ms timeslice) 是否比 sched_gpu_aware (local DSQ + default timeslice) 更适合 LLM serving。
+
+Round 1 (2026-02-28): sched_gpu_serving, c=1, 20 prompts
+
+| Scenario | TTFT (ms) | TPOT (ms) | Throughput (tok/s) | 请求 |
+|----------|-----------|-----------|-------------------|------|
+| B0 baseline (CFS) | 53.11 | 3.68 | 49.33 | 20/20 |
+| B1 stress (CFS) | 63.25 | 4.71 | 49.29 | 20/20 |
+| B3 stress+serving | 67.97 | 4.95 | 49.19 | 20/20 |
+
+vs POC-1 R2 sched_gpu_aware (c=1, 50 prompts):
+
+| Scenario | TTFT (ms) | TPOT (ms) | Throughput (tok/s) |
+|----------|-----------|-----------|-------------------|
+| B0 baseline | 58.6 | 3.70 | 41.8 |
+| B1 stress | 71.1 | 4.63 | 41.8 |
+| B3 stress+gpu_aware | 76.2 | **3.70** | 41.9 |
+
+**sched_gpu_serving 发现**:
+- serving TPOT: 4.95ms (比 stress 的 4.71ms 还差)
+- serving 的非 GPU 任务走 SCX_DSQ_LOCAL → 缺少 SHARED_DSQ 的全局公平调度 → 无法实现优先级反转
+
+Round 2 (2026-02-28): sched_gpu_aware (修复版), c=1, 20 prompts
+
+**BUG**: R4 发现 `SCX_ENQ_DSQ_PRIQ` flag 与 kernel `enq_flags` 冲突 → scheduler crash (runtime error: invalid enq_flags 0x200000000000009)。修复：移除 `SCX_ENQ_DSQ_PRIQ`，使用普通 FIFO。
+
+R5 (修复后): sched_gpu_aware = GPU→GPU_BOOST_DSQ(40ms) + 非GPU→SHARED_DSQ(FIFO)
+
+| Scenario | TTFT (ms) | TPOT (ms) | Throughput (tok/s) | 请求 |
+|----------|-----------|-----------|-------------------|------|
+| B0 baseline (CFS) | 50.5 | 3.71 | 49.33 | 20/20 |
+| B1 stress (CFS) | 61.3 | 4.44 | 46.80 | 19/20 |
+| B3 stress+gpu_aware | 70.6 | **3.72** | 49.52 | 20/20 |
+
+**TPOT 完全恢复！** 3.72ms ≈ baseline 3.71ms (stress 下 4.44ms → +20% 退化完全消除)
+
+Scheduler 统计:
+- local=8,643 (idle CPU fast path, 预热阶段)
+- global=360,731 (非 GPU 任务 via SHARED_DSQ)
+- gpu_boosted=12,028 (GPU 任务获得优先调度)
+
+**核心架构洞察**:
+1. **SHARED_DSQ (全局 FIFO) 是关键**: 非 GPU 任务（stress-ng）进入全局队列，GPU 任务在 GPU_BOOST_DSQ 获得优先 dispatch
+2. **SCX_DSQ_LOCAL 不行**: sched_gpu_serving 把非 GPU 任务放 local DSQ → 每个 CPU 上 stress-ng 线程独占本地队列 → GPU 优先级反转不生效
+3. **enq_flags 传递**: 必须保留 kernel 传入的 `enq_flags`，不能 OR 额外的 DSQ_PRIQ flag
+
+**TTFT 退化**: xcoord TTFT (70.6ms) > stress (61.3ms)。原因: SHARED_DSQ 全局队列引入额外 dispatch 延迟。TPOT 恢复但 TTFT 代价略增（可接受，因为 TTFT 在绝对值上仍<100ms）。
+
+**Bug fixes**:
+1. **pkill self-kill**: `cleanup_xcoord_stale()` 中 `pkill -f sched_gpu_serving` 匹配了 Python 脚本自身命令行 → 改为 `pkill -x` (精确进程名匹配)
+2. **SCX_ENQ_DSQ_PRIQ crash**: kernel enq_flags + PRIQ flag 冲突 → 移除 PRIQ flag
+3. **CWD issue**: background Bash commands 继承上一次 cd 后的目录 → 使用绝对路径
+
+---
+
+**R5 c=4: sched_gpu_aware (GPU_BOOST_DSQ + SHARED_DSQ), 50 prompts**
+
+| Scenario | TTFT (ms) | P99 TTFT (ms) | TPOT (ms) | Throughput (tok/s) | 请求 |
+|----------|-----------|--------------|-----------|-------------------|------|
+| B0 baseline (CFS) | 133.5 | 258.1 | 11.97 | 295.6 | 50/50 |
+| B1 stress (CFS) | 167.4 | **420.8** | 12.92 | 270.9 | **47/50** |
+| B3 stress+xcoord | 160.1 | **305.7** | 12.91 | 276.8 | **50/50** |
+
+**c=4 改善**:
+- TTFT: -4.4% (167.4→160.1ms)
+- **P99 TTFT: -27.3%** (420.8→305.7ms) — 尾延迟大幅降低
+- Throughput: +2.2% (270.9→276.8 tok/s)
+- **Reliability: 47/50→50/50** — 6.4% more requests completed
+
+**TPOT (c=4)**: 12.92→12.91ms (≈ 0%) — 高并发时 TPOT 不受影响（GPU compute 已饱和，CPU调度非瓶颈）
+
+---
+
+**综合 llama.cpp 20B 结果 (sched_gpu_aware R5)**:
+
+| Concurrency | Metric | Baseline | Stress | xCoord | 改善 |
+|------------|--------|----------|--------|--------|------|
+| c=1 | TPOT (ms) | 3.71 | 4.44 | **3.72** | **完全恢复** |
+| c=1 | Throughput | 49.3 | 46.8 | **49.5** | **完全恢复** |
+| c=1 | Reliability | 20/20 | 19/20 | **20/20** | 恢复 |
+| c=4 | P99 TTFT (ms) | 258.1 | 420.8 | **305.7** | **-27.3%** |
+| c=4 | Throughput | 295.6 | 270.9 | **276.8** | +2.2% |
+| c=4 | Reliability | 50/50 | 47/50 | **50/50** | **恢复** |
+
+**核心 takeaway**:
+1. c=1: **TPOT 和 throughput 完全恢复到 baseline** → CPU调度是低并发时的关键瓶颈
+2. c=4: **P99 尾延迟大幅降低 (-27%), reliability 完全恢复** → 高并发时主要帮助减少尾部 jitter
+3. TTFT 略有退化 (SHARED_DSQ 全局队列开销) → 可接受的 trade-off

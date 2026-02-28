@@ -47,8 +47,20 @@ extension/prefetch_cross_block
 extension/prefetch_cross_block_v2
 extension/prefetch_max_passive_mru
 extension/eviction_lfu_xcoord
+extension/prefetch_proactive_layer
 extension/sched_gpu_aware
+extension/sched_gpu_minimal
+extension/sched_gpu_serving
+
+# Extension build artifacts
+extension/.output/
 
 # Presentation build output
 docs/presentation/*/dist/
-extension/prefetch_proactive_layer
+
+# Benchmark results written by scripts into workload dirs (duplicates of scripts/xcoord/results/)
+workloads/llama.cpp/scripts/
+workloads/faiss/scripts/
+
+# FAISS submodule (large, cloned separately)
+workloads/faiss/faiss
