@@ -1034,23 +1034,466 @@ Adjacent 步序非常短 — 大部分只走 1 步就跳到远处。这解释了
 - 平均 region 大小: ~4 blocks (8 MB)
 - 这意味着模型权重在 VA 空间中高度碎片化，不适合 adjacent prefetch
 
-### 15.7 潜在改进方向
+### 15.7 §15.6-§15.7 结论修正 (2026-02-28 深度分析)
 
-基于分析，以下策略可能比盲目 adjacent 更有效：
+**§15.6 的分析使用了短 trace (chunk_trace_120b_raw.csv, 65K events)，长 trace 分析 (chunk_trace_120b_long.csv, 358K events) 得出显著不同的结论。**
 
-1. **History-3 prediction**（67.7% accuracy）
-   - 记录最近 3 次 block jump → 预测下一跳
-   - 挑战：36K patterns 需要 BPF HASH map，热路径查找可能太慢
-   - 可能方案：PERCPU_ARRAY 做 hash table（固定大小），接受 collision
+---
 
-2. **Layer-aware prefetch**（基于 VA→layer mapping）
-   - 从当前 layer 推断下一层，prefetch 对应 VA region
-   - 需要 layer_va_ranges.json 的 36 条映射
-   - 与 template_belady eviction 共享 infrastructure
+## 17. 深度分析结果 (2026-02-28)
 
-3. **Selective cross-block**
-   - 只在检测到 consecutive adjacent run 时 prefetch（连续 2+ 次 adjacent 才激活）
-   - 避免 far jump 后的无效 prefetch
+### 17.1 方法论
+
+两个新分析工具：
+
+1. **`simulate_vram.py`** — VRAM 缓存模拟器
+   - 将 ACTIVATE 事件作为 cache miss 重放
+   - 可配置: VRAM 容量、eviction policy (LRU/FIFO/T1-protect)、prefetch strategy (none/adjacent/selective)
+   - 新增 **prefetch_placement** 参数: MRU insert (真实 UVM 行为) vs LRU insert (优化方案)
+   - 跟踪: demand faults、prefetch hits/wastes、net DMA change
+
+2. **`analyze_crossblock_v3.py`** — 增强版访问模式分析
+   - Prefill vs Decode 阶段分离
+   - Per-layer transition 分类 (intra-layer vs inter-layer)
+   - History-based prediction 压缩分析 (短 trace vs 长 trace 对比)
+
+### 17.2 短 trace vs 长 trace 结论差异
+
+| 指标 | 短 trace (65K events) | 长 trace (358K events) | 差异 |
+|------|---------------------|----------------------|------|
+| Adjacent hit rate (overall) | 26.4% | 16.5% | **-37% 下降** |
+| History-1 accuracy | 27.9% | 17.4% | -38% |
+| History-2 accuracy | 39.5% | 23.9% | -39% |
+| History-3 accuracy | **67.7%** | **48.5%** | **-28% 下降** |
+| History-3 unique patterns | 36K | **108K** | 3x 膨胀 |
+
+**原因**: 短 trace 中 decode 阶段数据不足，prefill 占比过高导致 adjacent hit rate 虚高。长 trace 有更完整的 decode steady-state。
+
+**结论**: §15.6 的 "67.7% 历史预测准确率" 被过度报告。实际 decode 阶段只有 48.5%，且 108K patterns 不可能装入 BPF map。
+
+### 17.3 Prefill vs Decode 阶段分离
+
+| 阶段 | Adjacent +1 hit rate | Adjacent +5 hit rate |
+|------|---------------------|---------------------|
+| Prefill (110 events, 634ms) | 35.8% | 59.6% |
+| **Decode (287K events, 9045ms)** | **16.5%** | **39.2%** |
+| Overall | 16.5% | 39.3% |
+
+**关键发现**:
+- Prefill 阶段的 adjacent hit rate 是 decode 的 **2x**
+- 但 prefill 只占总事件的 0.04%，对性能影响微乎其微
+- **Cross-block 对 decode（性能瓶颈阶段）帮助有限**: 83.5% 的 decode 转移不是 adjacent
+
+### 17.4 Per-Layer Transition 分析
+
+| 转移类型 | Decode 占比 | Adjacent hit rate |
+|---------|------------|-------------------|
+| Intra-layer (同层内) | 95.3% | 17.3% VA-adjacent |
+| Inter-layer adjacent (L→L±1) | 4.4% | — |
+| Inter-layer far | 0.3% | — |
+
+**关键发现**:
+- 95.3% 的 block transitions 发生在**同一层内** — 即 expert 之间切换
+- 层内的 VA-adjacent rate 仅 17.3% — MoE expert 在 VA 空间中不连续分布
+- Cross-block prefetch 本质上是在预取"同层内的下一个 VA block"，但同层 expert 之间不是连续排列的
+
+### 17.5 VRAM 模拟器核心发现
+
+#### Prefetch 插入位置的影响
+
+在真实 UVM 中，`gpu_block_activate` 将新 chunk 放在 eviction list **尾部 (MRU端，受保护)**。模拟器测试了两种策略：
+
+| 策略 | Eviction | Prefetch Hit Rate | Waste Rate | Net DMA Change |
+|------|---------|-------------------|------------|----------------|
+| **MRU insert (真实 UVM)** | T1-protect | **73.6%** | 20.8% | **+8,916 MB** (有害) |
+| LRU insert (优化) | T1-protect | 61.7% | 35.3% | +15,092 MB (更有害) |
+| **MRU insert** | LRU | **74.5%** | 17.1% | **+14,442 MB** (有害) |
+| LRU insert | FIFO | 47.4% | 52.6% | **-8,686 MB** (有益!) |
+
+**惊人发现**: MRU insert（真实行为）给出 73.6% prefetch hit rate — 远高于静态分析的 16.5% adjacent hit rate！这是因为 MRU insert 保护 prefetched data 不被立即淘汰，给它足够时间等到被 demand access。
+
+**但即使 73.6% hit rate，cross-block 在所有配置下仍然 net harmful**（除了 FIFO+LRU insert 这个特殊组合）。原因：26,054 prefetches 只消除了 21,596 demand faults，多出的 4,458 prefetches 是纯浪费 DMA。
+
+#### Eviction Policy × Prefetch 交互矩阵
+
+```
+                         Net DMA change (MB)
+                    No prefetch | MRU insert | LRU insert
+    LRU:                    0   |   +14,442  |   +33,562
+    T1-protect:             0   |    +8,916  |   +15,092
+    FIFO:                   0   |   +14,450  |    -8,686  ← 唯一有益!
+```
+
+**解读**:
+1. **T1-protect + MRU insert 是最不坏的有害配置** (+8.9 GB)：T1 保护减少了对关键数据的驱逐
+2. **FIFO + LRU insert 是唯一有益配置** (-8.7 GB)：FIFO 不在 access 时提升 chunk，LRU insert 让无用 prefetch 快速被淘汰
+3. **LRU + LRU insert 是最差配置** (+33.6 GB)：demand access 会把 prefetched data 从 LRU 提升到 MRU，displacing useful data
+
+### 17.6 对 §13-§15 结论的修正
+
+| 原结论 | 修正 | 原因 |
+|--------|------|------|
+| "盲目 adjacent 命中率 26.4%" | **Decode 阶段仅 16.5%**（短 trace 过度乐观） | 长 trace 更多 decode 数据 |
+| "History-3 可达 67.7%" | **实际 48.5%**（108K patterns 不可行） | 短 trace pattern 重复率高 |
+| "每个 prefetch 驱逐一个 useful block" | **取决于 placement**: MRU insert 73.6% hit rate | 静态分析忽略了 prefetched data 在 VRAM 中的存活时间 |
+| "Cross-block 仅在 oversub < 1.2x 有效" | 也取决于 **(eviction policy, insertion position)** | FIFO+LRU insert 在 1.84x 仍有益 |
+| "HASH map 在热路径太慢" | **prefetch hook 不是热路径**，但 108K patterns 太大 | Xid 31 发生在 gpu_block_access，不在 gpu_page_prefetch |
+
+### 17.7 改进方向（更新版）
+
+基于深度分析，之前的三个改进方向需要重新评估：
+
+#### ❌ History-3 prediction — 不可行
+- 108K unique patterns，即使 4096-slot ARRAY 也只覆盖 46.7%，accuracy 23.0%
+- 长 trace 显示 pattern 不稳定，不适合固定大小 hash table
+
+#### ⚠️ Layer-aware prefetch — 理论可行但粒度太粗
+- Layer+1 预测 47.1% accurate，most-common 预测 57.6%
+- 但每层 ~439 chunks（878 MB），prefetch 一整层太激进
+- 需要 **per-expert VA mapping**（更细粒度），当前 infrastructure 不支持
+
+#### ⚠️ Selective (momentum) — 理论清晰但影响太小
+- 97% 减少无效 prefetch，67.3% hit rate
+- 但绝对量仅 2,154 prefetches（vs 41,814 baseline faults），影响 < 1%
+
+#### ✅ 新方向: Prefetch insertion policy 优化
+- 在 `gpu_block_activate` 中检测 chunk 是否来自 proactive prefetch
+- 如果是：**放在 LRU 端**（让无用 prefetch 快速淘汰）
+- 如果不是：正常放在 MRU 端
+- 实现简单：BPF map 记录 pending prefetch 地址，activate 时查询
+- 模拟结果: T1-protect + MRU-demand/LRU-prefetch 可能接近 FIFO+LRU 的效果
+
+#### ✅ 新方向: FIFO eviction + cross-block
+- 模拟显示 FIFO+LRU insert 是唯一 net beneficial 配置 (-8.7 GB)
+- FIFO 的核心优势：不在 access 时提升 chunk，避免 prefetched data 被 promoted
+- 可以实现为: `gpu_block_access` return BYPASS (不执行默认 move_tail)
+- 但 FIFO 对非 cross-block 场景可能不如 LRU — 需要实际 benchmark 验证
+
+### 17.8 分析工具
+
+- `workloads/llama.cpp/simulate_vram.py` — VRAM 缓存模拟器
+- `workloads/llama.cpp/analyze_crossblock_v3.py` — 增强版访问模式分析
+
+---
+
+## 18. 真实 Benchmark 结果 (2026-02-28)
+
+### 18.1 关键 Bug 发现：kprobe 未被 attach
+
+Cross-block v2 的 loader (`prefetch_cross_block_v2.c`) 只调用了 `bpf_map__attach_struct_ops()`
+来 attach struct_ops map，但**从未 attach kprobe program** (`capture_va_block`)。
+这意味着 `va_block_cache` 永远为空，cross-block prefetch **从未实际执行过**。
+
+Debug counters 确认:
+```
+kprobe fires: 0          ← kprobe 没有 attach!
+prefetch_hook fires: 67818
+wq scheduled: 0
+wq callback ran: 0
+```
+
+**修复**: 在 loader 中添加 `bpf_program__attach(skel->progs.capture_va_block)` 手动 attach kprobe。
+
+### 18.2 修复后 Benchmark 结果
+
+测试配置: 120B MoE, pp512/tg128, r=5, RTX 5090 32GB, 1.84x oversubscription
+
+| 配置 | pp512 (t/s) | tg128 (t/s) | pp delta | tg delta |
+|------|------------|------------|----------|----------|
+| **Baseline** (always_max + cycle_moe, no XB) | **214.97±3.11** | **83.95±4.65** | - | - |
+| XB + passive_mru (mode 0) | 204.84±2.09 | 59.99±2.75 | -4.7% | **-28.5%** |
+| XB + cycle_moe (mode 1) | 205.54±2.69 | 60.49±2.37 | -4.4% | **-28.0%** |
+| XB + default_lru (mode 2) | 203.83±2.77 | 60.53±2.57 | -5.2% | **-27.9%** |
+| XB + FIFO (mode 3) | 204.69±2.12 | 60.23±2.53 | -4.8% | **-28.3%** |
+
+### 18.3 Debug Counter 数据 (5 runs)
+
+| 模式 | kprobe | prefetch_hook | wq scheduled | wq callback | callback rate |
+|------|--------|---------------|-------------|-------------|---------------|
+| passive_mru | 228,590 | 198,664 | 104,549 | 88,908 | 85.0% |
+| cycle_moe | 228,641 | 198,715 | 104,581 | 89,125 | 85.2% |
+| default_lru | 228,539 | 198,613 | 104,510 | 89,080 | 85.2% |
+| FIFO | 228,331 | 198,405 | 104,335 | 89,117 | 85.4% |
+
+**观察**:
+- 所有模式的 stats 几乎完全相同（说明 eviction policy 不影响 fault 数量）
+- 每次 run 约 ~17.8K 次 cross-block migrate，每次 2MB = **~35.6 GB 额外 PCIe 流量/run**
+- 85% wq callback 执行率 — 15% 被丢弃（可能因为新的 wq_init 覆盖了未完成的旧请求）
+
+### 18.4 核心结论
+
+1. **Eviction policy 完全不影响 cross-block 性能** — 四种 eviction 模式给出相同的 ~60 tg。
+   这证实了 §17.5 VRAM 模拟的预测：**在 2x oversubscription 下，eviction policy 影响 < 1%**。
+
+2. **Cross-block 的 -28% 回归原因**:
+   - ~35.6 GB 额外 PCIe 流量 / run → 每 token 额外 ~56 MB migration
+   - 原始 per-token migration ~428 MB，增加 ~13%
+   - 但 tg 下降 28%，比纯流量增加更严重
+   - **额外损害来自 PCIe 带宽竞争**: async prefetch DMA 和 demand fault DMA 竞争同一 PCIe 链路
+   - 以及 **lock contention**: `bpf_gpu_migrate_range()` 需要 `va_space` 锁，与 fault handler 竞争
+
+3. **VRAM 模拟的预测 vs 真实结果**:
+   - 模拟预测：FIFO+LRU insert 是唯一有益组合 (-8.7 GB)
+   - 真实结果：FIFO 同样有害 (-28%)
+   - **差异原因**: 模拟没有考虑 PCIe 竞争和锁争用，只考虑了 VRAM 内容变化
+   - 模拟对于评估 "额外流量" 有用，但无法预测并发竞争的影响
+
+4. **Blind adjacent cross-block prefetch 在 120B MoE 1.84x oversubscription 下确定无益**:
+   - 不是 eviction policy 的问题
+   - 不是 insertion position 的问题
+   - 是 **PCIe 竞争 + 锁争用** 的根本问题
+   - 即使 prefetch 命中率达到 73%+，额外的竞争开销超过了减少 fault 的收益
+
+### 18.5 §18 结论修正
+
+**§18.4.2 "lock contention" 结论完全错误**：
+- `uvm_migrate_bpf()` 取 `uvm_va_space_down_read()` — READ lock
+- Fault handler 也取 `uvm_va_space_down_read()` — READ lock
+- Linux rwsem 允许多个 reader 同时持锁 — 读-读不冲突
+- Cross-block 目标是 block N+1，fault 在 block N — per-block mutex 也不冲突
+- **真正的竞争只有 PCIe 带宽共享和 GPU 内存分配（eviction）**
+
+**§18.3 "~35.6 GB 额外 PCIe traffic" 是上界估算**：
+- 假设所有 17.8K callback 都迁移完整 2MB
+- 实际 `uvm_va_block_make_resident()` 跳过已 resident 的 page
+- 需要内核级 trace 才能知道实际 DMA 量
+
+---
+
+## 19. Cross-Block 迭代优化实验 (2026-02-28)
+
+### 19.1 实验配置
+
+所有实验: 120B MoE, pp512/tg128, r=5, RTX 5090 32GB, ~1.84x oversubscription
+Eviction: cycle_moe (除非另注)
+BPF 改进: kprobe 正确 attach, migrate 返回值追踪, per-CPU wq_map(max_entries=64)
+
+### 19.2 Granularity 实验
+
+| 粒度 | pp512 | tg128 | tg delta | wq sched | migrate ok | rate skip |
+|------|-------|-------|----------|----------|------------|-----------|
+| Baseline (no XB) | 214.97 | 83.95 | — | — | — | — |
+| **2MB** | 203.69 | 60.33 | **-28.2%** | 104,637 | 88,817 | 94,035 |
+| 512KB | 207.80 | 56.40 | -32.8% | 145,675 | 121,532 | 77,053 |
+| 256KB | 207.76 | 51.97 | -38.1% | 150,488 | 125,818 | 77,948 |
+| 64KB | 205.76 | 47.44 | -43.5% | 154,595 | 129,878 | 78,373 |
+
+**结论**: 更小粒度 = 更差性能。原因：
+1. 小粒度 cross-block 只覆盖下一 block 的部分 → 剩余部分仍需 demand fault
+2. 更多 demand fault → 更多 prefetch hook 触发 → 更多 cross-block prefetch 请求
+3. Per-CPU rate-limiting 导致同一 block 从多个 CPU 重复 prefetch
+4. 级联效应: 小粒度 paradoxically 增加总 DMA 量
+
+### 19.3 Direction-Aware Prefetch
+
+**设计**: 追踪 per-CPU 最近 2 个 block VA（prev, cur），只在连续 2+ 次同方向转换时 prefetch。
+同时使用 global dedup (ARRAY map) 防止跨 CPU 重复 prefetch。
+
+| Policy | pp512 | tg128 | tg delta | wq sched | migrate ok | dir skip | dedup |
+|--------|-------|-------|----------|----------|------------|----------|-------|
+| Baseline (no XB) | 214.97 | 83.95 | — | — | — | — | — |
+| Blind adjacent (global dedup) | 213.52 | 61.82 | -26.4% | 104,603 | 88,917 | 0 | 25 |
+| **Direction-aware** | **212.74** | **70.27** | **-16.3%** | **82,273** | **69,133** | **27,118** | 6 |
+
+**Direction-aware 改进效果**:
+- tg: 61.82 → 70.27 (**+13.7%** 相对改进)
+- 过滤掉 27,118 次无效 prefetch (26% 的 hook 调用)
+- 总 migration 减少 22%: 88,917 → 69,133
+- 仍然 -16.3% vs baseline，说明即使方向正确的 prefetch 也有 displacement 代价
+
+### 19.4 Direction-Aware × Eviction Policy
+
+| Policy | pp512 | tg128 | tg delta | wq sched | migrate ok |
+|--------|-------|-------|----------|----------|------------|
+| Dir-aware + cycle_moe | 212.74 | 70.27 | -16.3% | 82,273 | 69,133 |
+| Dir-aware + FIFO | 213.37 | 70.02 | -16.6% | 82,559 | 68,946 |
+
+**结论**: Eviction policy 对 direction-aware 同样无影响（70.27 vs 70.02 在误差范围内）。
+再次验证：**在 2x oversubscription 下，eviction policy 不是瓶颈**。
+
+### 19.5 当前进展总结与分析
+
+**已验证的优化方向**:
+1. ✅ **Direction-aware prefetch**: 从 -28% 回归改善到 -16%，有效减少 ~22% 无效 prefetch
+2. ❌ **Smaller granularity**: 反而更差（cascading effect — 更多 demand fault）
+3. ❌ **Eviction policy 变换**: 四种 eviction 模式均无显著差异
+
+**Key instrumentation 数据** (所有实验 migrate 成功率 >99.9%, 失败仅 ~50 次):
+- migrate success/fail 分布说明 cross-block target 地址有效，DMA 确实在发生
+- 99.9% 成功率 ≠ 99.9% 有用：成功只表示 `uvm_migrate()` 没报错，不代表目标 page 不在 VRAM
+- 需要内核级 trace 才能区分 "实际 DMA" vs "已 resident 的 no-op migrate"
+
+**§18 结论修正**:
+- ❌ "lock contention" → 错误：fault 和 prefetch 都取 READ lock，不冲突
+- ⚠️ "35.6 GB 额外流量" → 上界估算，实际可能更小
+- ⚠️ "eviction policy 无影响" → 正确，但原因不是 lock contention，而是 displacement 代价在 VRAM 满载时是常数
+- ⚠️ "cross-block 确定无益" → 过于武断：direction-aware 已将回归从 -28% 缩小到 -16%
+
+### 19.6 Momentum Strictness 实验
+
+| Filter | pp512 | tg128 | tg delta | wq sched | migrate ok | dir skip |
+|--------|-------|-------|----------|----------|------------|----------|
+| Baseline (no XB) | 214.97 | 83.95 | — | — | — | — |
+| Blind adjacent | 213.52 | 61.82 | -26.4% | 104,603 | 88,917 | 0 |
+| 2-step direction | 212.74 | 70.27 | -16.3% | 82,273 | 69,133 | 27,118 |
+| 3-step direction | 216.17 | 77.90 | -7.2% | 71,765 | 59,769 | 38,039 |
+| Dir-aware + 512KB | 213.25 | 64.73 | -22.9% | 108,473 | 88,451 | 33,868 |
+| Dir-aware + FIFO | 213.37 | 70.02 | -16.6% | 82,559 | 68,946 | 27,251 |
+| **Adjacent-stride** | **228.86** | **88.31** | **+5.2%** | **1,523** | **1,415** | **133,480** |
+
+### 19.7 Adjacent-Stride: 突破性发现
+
+**Adjacent-stride filter**: 要求连续 3 次 block 转换都是恰好 ±1 VA block（2MB 步长）。
+
+**结果**: pp=228.86 (+6.5%), tg=88.31 (**+5.2% 超过 baseline!**)
+
+**为什么有效**:
+1. 极度 selective — 5 runs 仅 1,523 次 prefetch（vs blind 的 104K）
+2. 几乎只在 **prefill 阶段**触发（顺序加载模型权重时产生连续 adjacent 访问）
+3. Decode 阶段 MoE expert 切换是非 adjacent 的 → adjacent-stride 自动静默
+4. 283 次/run × 2MB = ~566 MB 额外 prefetch — 忽略不计
+5. 这些 prefetch 命中率极高（真正的顺序访问模式），有效减少 prefill fault 数量
+6. 更少 demand fault → 更少 prefetch hook 调用 → 减少 BPF overhead
+7. pp 从 215 → 229 (+6.5%) 说明 prefill 确实受益于 cross-block
+
+**Adjacent-stride 本质上是一个自动 prefill-only cross-block**:
+不需要显式检测 prefill/decode 阶段，adjacent-stride 的严格条件自然过滤掉 decode 阶段的所有 prefetch。
+
+**与 always_max + cycle_moe 的组合效果**:
+- always_max: 每次 fault 时 prefetch 当前 block 内所有 page (intra-block)
+- adjacent-stride: 检测到连续顺序访问时 prefetch 下一个 block (cross-block, prefill only)
+- cycle_moe: T1 数据保护 + non-T1 使用 kernel LRU
+
+### 19.8 Adjacent-Stride 确认实验 (2026-02-28 续)
+
+同一次 driver 加载下的完整对比（排除 driver reload 变量干扰）：
+
+| Configuration | pp512 | tg128 | Notes |
+|---------------|-------|-------|-------|
+| No BPF (threshold=51) | 144.21 ± 0.91 | 49.50 ± 3.85 | 纯 kernel 默认 |
+| always_max + cycle_moe (no XB) | 220.86 ± 1.70 | 87.32 ± 5.80 | intra-block only |
+| adj-stride + cycle_moe | 227.77 ± 1.89 | 88.21 ± 5.68 | **最佳组合** |
+| adj-stride + default_lru | 221.88 ± 1.45 | 85.74 ± 5.05 | kernel LRU |
+| adj-stride + FIFO | 222.07 ± 1.93 | 85.86 ± 5.45 | 冻结位置 |
+
+**Adjacent-stride + cycle_moe stats (5 runs)**:
+```
+kprobe fires:        284,263
+prefetch_hook fires: 254,337
+wq scheduled:          1,520  (0.6% of hook fires)
+wq callback ran:       1,416
+migrate success:       1,414  (99.9% success rate)
+migrate failed:            2
+rate-limit skip:     119,281
+direction skip:      133,536  (99.4% filtered)
+dedup skip:                0
+```
+
+**关键发现**:
+
+1. **Adjacent-stride 确认可复现**: 两次独立测试 tg=88.31 和 88.21，高度一致
+2. **pp 提升有意义**: cycle_moe + adj-stride pp=227.77 vs no-XB pp=220.86 = **+3.1%**
+3. **tg 无害**: 88.21 vs 87.32 = +1.0%（在 σ=5.7 的噪声范围内）
+4. **cycle_moe 仍是最佳 eviction**: adj-stride + cycle_moe (88.21) > default_lru (85.74) ≈ FIFO (85.86)
+5. **Cross-block 数量极低时 eviction policy 仍然有差异**: cycle_moe 的 T1 保护在 decode 阶段提供额外收益，与 cross-block 无关
+
+**Adjacent-stride 的工程价值**:
+- 完全消除了 blind cross-block prefetch 的 -28% 回归
+- 在 prefill 阶段提供了额外的 +3% pp 收益
+- ~280 次/run 的 prefetch 活动对系统资源几乎无影响
+- 不需要手动区分 prefill/decode — 利用访问模式自动识别
+
+### 19.9 §18-§19 最终结论
+
+1. **§18 "lock contention" 结论 → 完全否定**
+   - 代码分析证明: fault handler 和 `uvm_migrate_bpf()` 都取 `va_space_down_read()` (READ lock)
+   - Linux rwsem 允许多个 reader 同时持锁，不存在读-读竞争
+   - 真正原因: **PCIe 带宽竞争** + **VRAM displacement** (每次 prefetch 触发 eviction)
+
+2. **§18 "eviction policy 无影响" 结论 → 修正为 "仅在 high-volume cross-block 时无影响"**
+   - 当 cross-block prefetch 数量很高 (~17K/run) 时，eviction policy 确实被 PCIe 竞争掩盖
+   - 但当 cross-block 数量极低 (~280/run, adjacent-stride) 时，cycle_moe 仍比 default_lru/FIFO 好 2-3%
+
+3. **Cross-block prefetch 关键成功因素: 选择性 > 覆盖率**
+
+   | 策略 | 过滤率 | tg128 | 与 baseline 比 |
+   |------|--------|-------|---------------|
+   | Blind adjacent | 0% | 61.82 | -29% |
+   | 2-step direction | 33% | 70.27 | -19% |
+   | 3-step direction | 44% | 77.90 | -11% |
+   | **Adjacent-stride** | **99.4%** | **88.21** | **+1.0%** |
+
+   越严格的过滤 → 越少的无效 prefetch → 越少的 VRAM displacement → 越好的性能
+
+4. **更小粒度 (512KB/256KB/64KB) 不是解决方案**
+   - 部分 coverage 导致更多 demand fault → 级联增加 DMA 总量
+   - 2MB (完整 VA block) 仍是最佳粒度
+
+5. **更大粒度 (4MB/8MB multi-block) 也不是解决方案**
+   - 4MB adjacent-stride: pp=222.53, tg=86.58 (vs 2MB: pp=227.77, tg=88.21)
+   - 相同 prefetch 次数 (~1,480) 但每次 4MB → 2x DMA 总量 → 更多 displacement
+   - migrate failed 从 2 增加到 11（某些地址超出 managed range）
+   - **2MB (单个 VA block) 是最优粒度**：恰好覆盖下一个 block，不多不少
+
+### 19.10 最佳配置总结
+
+**生产推荐**: `./prefetch_cross_block_v2 1 2048 3`
+- 1 = cycle_moe eviction (T1 保护 + non-T1 kernel LRU)
+- 2048 = 2MB prefetch (单个 VA block)
+- 3 = adjacent-stride filter (99.4% 过滤率)
+
+**完整性能对比** (120B MoE, pp512/tg128, 1.84x oversubscription):
+```
+Configuration                      pp512     tg128     vs stock   runs
+─────────────────────────────────  ───────   ───────   ────────   ────
+Stock kernel (threshold=51)        144.21     49.50    baseline    5
+always_max + cycle_moe             220.86     87.32    +76% tg     5
+adj-stride + cycle_moe (2MB)       227.77     88.21    +78% tg     5
+adj-stride + cycle_moe (4MB)       222.53     86.58    +75% tg     5
+adj-stride + default_lru (2MB)     221.88     85.74    +73% tg     5
+adj-stride + FIFO (2MB)            222.07     85.86    +73% tg     5
+```
+
+### 19.11 高置信度实验 (10 runs)
+
+| Config | pp512 | tg128 | σ(tg) |
+|--------|-------|-------|-------|
+| always_max + cycle_moe (no XB) | 221.33 ± 3.49 | 88.79 ± 8.94 | 8.94 |
+| adj-stride + cycle_moe (2MB) | 221.26 ± 2.59 | 87.58 ± 8.33 | 8.33 |
+
+**Adjacent-stride stats (10 runs)**:
+```
+wq scheduled:   2,879  (~288/run, consistent with 5-run data)
+migrate success: 2,667  (99.9% success)
+migrate failed:      3
+```
+
+**统计分析**:
+- tg 差异: 88.79 - 87.58 = 1.21 tok/s
+- pooled σ ≈ 8.6, t-statistic = 1.21 / (8.6 × √(2/10)) ≈ 0.31
+- **p >> 0.05, 差异不显著**
+
+**修正后的结论**: Adjacent-stride 在 1.84x oversubscription 下**统计上等效于无 cross-block prefetch**。
+- 不造成任何可测量的伤害（vs blind 的 -28% 回归）
+- 也不提供任何可测量的收益
+- ~288 次/run 的 prefetch 太少，不足以影响 prefill 速度
+- 之前 5-run 数据显示的 "+3.1% pp" 在 σ≈3.5 的背景下不显著
+
+**核心发现: 在 1.84x oversubscription 下，cross-block prefetch 要么有害（blind）要么无效（filtered）**。
+性能的主要驱动力是 **intra-block always_max + cycle_moe eviction**，cross-block 无法在此基础上进一步提升。
+
+### 19.12 为什么 cross-block 无法帮助
+
+1. **VRAM 严重过压** (1.84x): 每个 prefetch 的 2MB 必须驱逐 2MB 有用数据
+2. **Prefetch 的 net value = 命中收益 - 驱逐损失**: 在高过压下，驱逐损失 ≈ 命中收益 → net ≈ 0
+3. **Intra-block already_max 已足够**: 当前 block 内的 always_max 已覆盖所有 page-level fault
+4. **Adjacent block 的价值取决于后续访问**: MoE 模型的 decode 阶段是 expert-switching，下一个 block 几乎不是 adjacent
+5. **Prefill 阶段的 sequential 访问确实触发 adjacent-stride，但**: prefill 只占总运行时间的小部分，且 prefetch 带宽与 demand fault 竞争
+
+**Cross-block prefetch 可能有价值的场景**:
+- **低过压** (< 1.3x): VRAM 有余裕吸收 prefetch 数据不必立即驱逐
+- **强序列性工作负载**: 非 MoE 的 dense model，整个推理过程是 sequential weight loading
+- **PCIe 带宽有余** (Gen5 x16): 当前 Gen5 x16 已经足够，但如果 compute 更快则 PCIe 再次成为瓶颈
 
 ---
 
