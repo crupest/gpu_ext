@@ -1,11 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * xCoord CPU-side: GPU-Aware sched_ext Scheduler
+ * xCoord CPU-side BASELINE: Blind Priority Boost sched_ext Scheduler
  *
- * A simple sched_ext scheduler that reads GPU state from the shared
- * gpu_state_map and uvm_worker_pids map (written by eviction_lfu_xcoord)
- * to boost CPU scheduling priority for kernel threads actively handling
- * UVM page faults.
+ * Baseline scheduler that blindly boosts ALL threads of registered GPU
+ * processes and recently-active UVM workers. Uses a fixed priority scheme:
+ *   GPU tasks → GPU_BOOST_DSQ (FIFO, 40ms timeslice, dispatched first)
+ *   Non-GPU tasks → SHARED_DSQ (global PRIQ with vtime fairness)
+ *
+ * This is the baseline for comparison with the adaptive xCoord scheduler.
+ * Known limitations:
+ *   - Boosts all process threads indiscriminately (idle, GC, I/O included)
+ *   - Global SHARED_DSQ breaks CFS per-CPU locality for non-GPU tasks
+ *   - No GPU-state-driven adaptation (always boosts, even when GPU is idle)
+ *   - 5s UVM worker timeout is too coarse (effectively "always boost")
  *
  * Based on scx_simple from Linux kernel tools/sched_ext/.
  * Simplified to avoid UEI (32-bit atomics not supported by clang 18).
@@ -116,7 +123,7 @@ static bool is_gpu_task(struct task_struct *p)
 	return false;
 }
 
-s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
+s32 BPF_STRUCT_OPS(gpu_baseline_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
 	bool is_idle = false;
@@ -143,7 +150,7 @@ s32 BPF_STRUCT_OPS(gpu_aware_select_cpu, struct task_struct *p,
 	return cpu;
 }
 
-void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(gpu_baseline_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	u64 vtime = p->scx.dsq_vtime;
 
@@ -171,30 +178,30 @@ void BPF_STRUCT_OPS(gpu_aware_enqueue, struct task_struct *p, u64 enq_flags)
 			    enq_flags);
 }
 
-void BPF_STRUCT_OPS(gpu_aware_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(gpu_baseline_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/* Drain GPU boost queue first (higher priority) */
 	scx_bpf_dsq_move_to_local(GPU_BOOST_DSQ);
 	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
-void BPF_STRUCT_OPS(gpu_aware_running, struct task_struct *p)
+void BPF_STRUCT_OPS(gpu_baseline_running, struct task_struct *p)
 {
 	if (time_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
 }
 
-void BPF_STRUCT_OPS(gpu_aware_stopping, struct task_struct *p, bool runnable)
+void BPF_STRUCT_OPS(gpu_baseline_stopping, struct task_struct *p, bool runnable)
 {
 	p->scx.dsq_vtime += (SCX_SLICE_DFL - p->scx.slice) * 100 / p->scx.weight;
 }
 
-void BPF_STRUCT_OPS(gpu_aware_enable, struct task_struct *p)
+void BPF_STRUCT_OPS(gpu_baseline_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(gpu_aware_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(gpu_baseline_init)
 {
 	s32 ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
 	if (ret)
@@ -202,19 +209,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(gpu_aware_init)
 	return scx_bpf_create_dsq(GPU_BOOST_DSQ, -1);
 }
 
-void BPF_STRUCT_OPS(gpu_aware_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(gpu_baseline_exit, struct scx_exit_info *ei)
 {
 	/* Simple exit recording without UEI (avoids 32-bit atomic issue) */
 	exit_kind = 1;
 }
 
-SCX_OPS_DEFINE(gpu_aware_ops,
-	       .select_cpu	= (void *)gpu_aware_select_cpu,
-	       .enqueue		= (void *)gpu_aware_enqueue,
-	       .dispatch	= (void *)gpu_aware_dispatch,
-	       .running		= (void *)gpu_aware_running,
-	       .stopping	= (void *)gpu_aware_stopping,
-	       .enable		= (void *)gpu_aware_enable,
-	       .init		= (void *)gpu_aware_init,
-	       .exit		= (void *)gpu_aware_exit,
-	       .name		= "gpu_aware");
+SCX_OPS_DEFINE(gpu_baseline_ops,
+	       .select_cpu	= (void *)gpu_baseline_select_cpu,
+	       .enqueue		= (void *)gpu_baseline_enqueue,
+	       .dispatch	= (void *)gpu_baseline_dispatch,
+	       .running		= (void *)gpu_baseline_running,
+	       .stopping	= (void *)gpu_baseline_stopping,
+	       .enable		= (void *)gpu_baseline_enable,
+	       .init		= (void *)gpu_baseline_init,
+	       .exit		= (void *)gpu_baseline_exit,
+	       .name		= "gpu_baseline");

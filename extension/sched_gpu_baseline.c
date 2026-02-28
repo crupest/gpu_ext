@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * xCoord CPU-side: GPU-Aware sched_ext scheduler loader
+ * xCoord CPU-side BASELINE: Blind Priority Boost scheduler loader
  *
- * Loads sched_gpu_aware.bpf.c and connects it to the shared gpu_state_map
+ * Loads sched_gpu_baseline.bpf.c and connects it to the shared gpu_state_map
  * pinned by eviction_lfu_xcoord at /sys/fs/bpf/xcoord_gpu_state.
+ * This is the baseline (blind boost) for comparison with adaptive xCoord.
  *
  * Uses SCX enum initialization from scx/common.h but manual load/attach
  * (no UEI) because the BPF side avoids UEI to work around clang 18's
@@ -21,7 +22,7 @@
 #include <bpf/libbpf.h>
 #include <scx/common.h>
 
-#include "sched_gpu_aware.skel.h"
+#include "sched_gpu_baseline.skel.h"
 #include "shared_maps.h"
 
 static bool verbose;
@@ -40,7 +41,7 @@ static void sigint_handler(int sig)
 	exit_req = 1;
 }
 
-static void read_stats(struct sched_gpu_aware_bpf *skel, __u64 *out)
+static void read_stats(struct sched_gpu_baseline_bpf *skel, __u64 *out)
 {
 	int nr_cpus = libbpf_num_possible_cpus();
 	assert(nr_cpus > 0);
@@ -64,7 +65,7 @@ static void read_stats(struct sched_gpu_aware_bpf *skel, __u64 *out)
 
 int main(int argc, char **argv)
 {
-	struct sched_gpu_aware_bpf *skel;
+	struct sched_gpu_baseline_bpf *skel;
 	struct bpf_link *link = NULL;
 	int opt;
 	__u64 threshold = XCOORD_FAULT_RATE_HIGH;
@@ -96,7 +97,7 @@ int main(int argc, char **argv)
 			break;
 		default:
 			fprintf(stderr,
-				"xCoord GPU-aware sched_ext scheduler.\n\n"
+				"xCoord BASELINE: blind priority boost sched_ext scheduler.\n\n"
 				"Reads GPU state from %s (written by eviction_lfu_xcoord)\n"
 				"and boosts CPU scheduling priority for GPU processes and\n"
 				"UVM fault handler threads.\n\n"
@@ -137,7 +138,7 @@ int main(int argc, char **argv)
 		       XCOORD_UVM_WORKERS_PIN);
 	}
 
-	skel = sched_gpu_aware_bpf__open();
+	skel = sched_gpu_baseline_bpf__open();
 	if (!skel) {
 		fprintf(stderr, "Failed to open BPF skeleton\n");
 		return 1;
@@ -148,7 +149,7 @@ int main(int argc, char **argv)
 	 * This is critical — without it, constants like SCX_DSQ_LOCAL,
 	 * SCX_SLICE_DFL, SCX_ENQ_HEAD are all 0, breaking the scheduler.
 	 */
-	skel->struct_ops.gpu_aware_ops->hotplug_seq = scx_hotplug_seq();
+	skel->struct_ops.gpu_baseline_ops->hotplug_seq = scx_hotplug_seq();
 	SCX_ENUM_INIT(skel);
 
 	/* Set configurable threshold */
@@ -180,13 +181,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	err = sched_gpu_aware_bpf__load(skel);
+	err = sched_gpu_baseline_bpf__load(skel);
 	if (err) {
 		fprintf(stderr, "Failed to load BPF skeleton: %d\n", err);
 		goto cleanup;
 	}
 
-	link = bpf_map__attach_struct_ops(skel->maps.gpu_aware_ops);
+	link = bpf_map__attach_struct_ops(skel->maps.gpu_baseline_ops);
 	if (!link) {
 		err = -errno;
 		fprintf(stderr, "Failed to attach struct_ops: %s\n",
@@ -212,7 +213,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	printf("xCoord GPU-aware scheduler loaded!\n");
+	printf("xCoord BASELINE scheduler loaded (blind boost)!\n");
 	printf("  Fault rate boost threshold: %llu faults/sec\n",
 	       (unsigned long long)threshold);
 	printf("  GPU process PIDs: %d registered\n", n_gpu_pids);
@@ -235,7 +236,7 @@ int main(int argc, char **argv)
 	bpf_link__destroy(link);
 
 cleanup:
-	sched_gpu_aware_bpf__destroy(skel);
+	sched_gpu_baseline_bpf__destroy(skel);
 
 	if (gpu_map_fd >= 0)
 		close(gpu_map_fd);

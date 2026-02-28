@@ -10,7 +10,7 @@
  * with boosted timeslice.
  * Non-GPU tasks: dispatched to local DSQ with default timeslice.
  *
- * This is "policy_minimal" — compare with sched_gpu_aware for the
+ * This is "policy_minimal" — compare with sched_gpu_baseline for the
  * full-featured version.
  */
 #include <scx/common.bpf.h>

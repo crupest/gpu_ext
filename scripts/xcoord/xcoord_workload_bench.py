@@ -8,7 +8,7 @@ Scenarios:
   B0: baseline (no stress)
   B1: + stress-ng (24 cores)
   B2: + stress + taskset (pin workload to cores 0-3)
-  B3: + stress + blind boost (sched_gpu_aware, current POC-1)
+  B3: + stress + blind boost (sched_gpu_baseline, current POC-1)
   B4: + stress + gpu_ext + blind boost (with eviction_lfu_xcoord for UVM workloads)
 
 Usage:
@@ -35,7 +35,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 EXTENSION_DIR = REPO_ROOT / "extension"
 
 # xCoord binaries
-SCHED_GPU_AWARE = EXTENSION_DIR / "sched_gpu_aware"
+SCHED_GPU_AWARE = EXTENSION_DIR / "sched_gpu_baseline"
 EVICTION_XCOORD = EXTENSION_DIR / "eviction_lfu_xcoord"
 
 # Pin paths
@@ -49,7 +49,7 @@ SCENARIOS = ["B0_baseline", "B1_stress", "B2_stress_taskset", "B3_stress_blind_b
 def cleanup_xcoord():
     """Kill stale xCoord processes and clean pinned maps."""
     subprocess.run(["sudo", "pkill", "-f", "eviction_lfu_xcoord"], capture_output=True)
-    subprocess.run(["sudo", "pkill", "-f", "sched_gpu_aware"], capture_output=True)
+    subprocess.run(["sudo", "pkill", "-f", "sched_gpu_baseline"], capture_output=True)
     time.sleep(1)
     for pin in [XCOORD_GPU_STATE_PIN, XCOORD_UVM_WORKERS_PIN]:
         subprocess.run(["sudo", "rm", "-f", str(pin)], capture_output=True)
@@ -82,9 +82,9 @@ def stop_stress(proc):
     subprocess.run(["killall", "stress-ng"], capture_output=True)
 
 
-def start_sched_gpu_aware(workload_pid, log_dir):
-    """Start sched_gpu_aware with -p PID."""
-    log = open(log_dir / "sched_gpu_aware.log", "w")
+def start_sched_gpu_baseline(workload_pid, log_dir):
+    """Start sched_gpu_baseline with -p PID."""
+    log = open(log_dir / "sched_gpu_baseline.log", "w")
     proc = subprocess.Popen(
         ["sudo", str(SCHED_GPU_AWARE), "-p", str(workload_pid)],
         stdout=log, stderr=subprocess.STDOUT,
@@ -96,7 +96,7 @@ def start_sched_gpu_aware(workload_pid, log_dir):
         print(f"    sched_ext state: {state}", file=sys.stderr)
     except Exception:
         pass
-    print(f"    sched_gpu_aware loaded (PID: {proc.pid}, boosting: {workload_pid})", file=sys.stderr)
+    print(f"    sched_gpu_baseline loaded (PID: {proc.pid}, boosting: {workload_pid})", file=sys.stderr)
     return proc, log
 
 
@@ -248,7 +248,7 @@ def run_scenario_gnn(scenario, args, output_dir):
             stress_proc = start_stress()
             time.sleep(2)
 
-        # For boost scenarios, we need to start sched_gpu_aware before the workload.
+        # For boost scenarios, we need to start sched_gpu_baseline before the workload.
         # We'll use PID=0 trick — actually we need to know the PID.
         # For GNN, the process starts and runs, so we can't get PID before it starts.
         # Alternative: start GNN in background, get PID, start xCoord, wait for GNN.
@@ -294,7 +294,7 @@ def run_scenario_gnn(scenario, args, output_dir):
                 evict_proc, evict_log = start_eviction_xcoord(gpu_pid, output_dir)
                 xcoord_procs["evict"] = (evict_proc, evict_log)
 
-            sched_proc, sched_log = start_sched_gpu_aware(gpu_pid, output_dir)
+            sched_proc, sched_log = start_sched_gpu_baseline(gpu_pid, output_dir)
             xcoord_procs["sched"] = (sched_proc, sched_log)
 
             # Wait for GNN to finish

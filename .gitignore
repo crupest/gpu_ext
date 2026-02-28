@@ -48,7 +48,7 @@ extension/prefetch_cross_block_v2
 extension/prefetch_max_passive_mru
 extension/eviction_lfu_xcoord
 extension/prefetch_proactive_layer
-extension/sched_gpu_aware
+extension/sched_gpu_baseline
 extension/sched_gpu_minimal
 extension/sched_gpu_serving
 

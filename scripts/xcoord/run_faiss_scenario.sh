@@ -8,7 +8,7 @@ set -euo pipefail
 SCENARIO="${1:-B0}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RESULT_DIR="$REPO_ROOT/workloads/faiss/xcoord_results"
-SCHED="$REPO_ROOT/extension/sched_gpu_aware"
+SCHED="$REPO_ROOT/extension/sched_gpu_baseline"
 mkdir -p "$RESULT_DIR"
 
 WITH_STRESS=false

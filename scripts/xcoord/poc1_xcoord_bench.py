@@ -2,7 +2,7 @@
 """POC-1: xCoord GPU->CPU Coordination benchmark.
 
 Uses the same benchmark methodology as server_bench.py (common.py utilities),
-adding xCoord lifecycle management (eviction_lfu_xcoord + sched_gpu_aware)
+adding xCoord lifecycle management (eviction_lfu_xcoord + sched_gpu_baseline)
 and CPU stress interference.
 
 Scenarios:
@@ -18,7 +18,7 @@ Usage:
     uv run --directory workloads/llama.cpp python ../../scripts/xcoord/poc1_xcoord_bench.py \
         --output-dir scripts/xcoord/results/poc1_test --scenarios uvm_xcoord
 
-Note: xCoord components (eviction_lfu_xcoord, sched_gpu_aware) require sudo.
+Note: xCoord components (eviction_lfu_xcoord, sched_gpu_baseline) require sudo.
       The script will call sudo internally for BPF tools only.
       Do NOT run the entire script with sudo (model cache is under $HOME).
 """
@@ -62,7 +62,7 @@ DEFAULT_MODEL_20B = (
 
 # xCoord binaries (default; can be overridden via --scheduler)
 EVICTION_XCOORD = REPO_ROOT / "extension" / "eviction_lfu_xcoord"
-SCHED_GPU_AWARE = REPO_ROOT / "extension" / "sched_gpu_aware"
+SCHED_GPU_AWARE = REPO_ROOT / "extension" / "sched_gpu_baseline"
 SCHED_GPU_SERVING = REPO_ROOT / "extension" / "sched_gpu_serving"
 
 # xCoord pinned map paths
@@ -85,7 +85,7 @@ def cleanup_xcoord_stale():
     # Use pkill -x (exact process name match) to avoid killing ourselves.
     # pkill -f matches the full command line and would kill this python script
     # if the scheduler name appears as an argument.
-    for name in ["eviction_lfu_xcoord", "sched_gpu_aware", "sched_gpu_serving",
+    for name in ["eviction_lfu_xcoord", "sched_gpu_baseline", "sched_gpu_serving",
                  "sched_gpu_minimal"]:
         subprocess.run(["sudo", "pkill", "-x", name], capture_output=True)
     time.sleep(1)
@@ -141,7 +141,7 @@ def start_xcoord(server_pid, output_dir, skip_gpu_ext=False, sched_binary=None):
     # Pass server PID via -p for direct process boosting
     sched_bin = sched_binary or SCHED_GPU_AWARE
     sched_cmd = ["sudo", str(sched_bin), "-p", str(server_pid)]
-    if str(sched_bin).endswith("sched_gpu_aware"):
+    if str(sched_bin).endswith("sched_gpu_baseline"):
         sched_cmd += ["-t", "1000"]
     cpu_log = open(output_dir / "xcoord_cpu.log", "w")
     cpu_proc = subprocess.Popen(
@@ -158,7 +158,7 @@ def start_xcoord(server_pid, output_dir, skip_gpu_ext=False, sched_binary=None):
     except Exception:
         print("  sched_ext state: unknown", file=sys.stderr)
 
-    print(f"  sched_gpu_aware loaded (PID: {cpu_proc.pid}, boosting server PID: {server_pid})",
+    print(f"  sched_gpu_baseline loaded (PID: {cpu_proc.pid}, boosting server PID: {server_pid})",
           file=sys.stderr)
     return procs
 
@@ -459,7 +459,7 @@ def main():
     parser.add_argument("--skip-gpu-ext", action="store_true",
                         help="Skip eviction_lfu_xcoord (for models that fit in VRAM)")
     parser.add_argument("--scheduler", type=Path,
-                        help="Path to sched_ext scheduler binary (default: sched_gpu_aware)")
+                        help="Path to sched_ext scheduler binary (default: sched_gpu_baseline)")
     args = parser.parse_args()
 
     # Model selection

@@ -34,5 +34,5 @@ prefetch_cross_block_v2
 prefetch_stride
 eviction_lfu_xcoord
 eviction_cycle_moe
-sched_gpu_aware
+sched_gpu_baseline
 test_timeslice_policy.py

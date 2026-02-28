@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * xCoord Serving Policy loader — optimized for LLM serving.
- * Same CLI interface as sched_gpu_aware.
+ * Same CLI interface as sched_gpu_baseline.
  */
 #include <stdio.h>
 #include <stdlib.h>

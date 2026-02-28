@@ -1,5 +1,5 @@
 #!/bin/bash
-# FAISS B3: stress + sched_gpu_aware boost
+# FAISS B3: stress + sched_gpu_baseline boost
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -40,12 +40,12 @@ if [ -z "$GPU_PID" ]; then
   GPU_PID=$FAISS_PID
 fi
 
-# Start sched_gpu_aware
-sudo "$REPO_ROOT/extension/sched_gpu_aware" -p "$GPU_PID" > "$RESULT_DIR/B3_sched.log" 2>&1 &
+# Start sched_gpu_baseline
+sudo "$REPO_ROOT/extension/sched_gpu_baseline" -p "$GPU_PID" > "$RESULT_DIR/B3_sched.log" 2>&1 &
 SCHED_PID=$!
 sleep 2
 echo "sched_ext state: $(cat /sys/kernel/sched_ext/state 2>/dev/null)" >&2
-echo "sched_gpu_aware PID: $SCHED_PID" >&2
+echo "sched_gpu_baseline PID: $SCHED_PID" >&2
 
 # Wait for FAISS
 wait $FAISS_PID

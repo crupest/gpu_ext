@@ -18,7 +18,7 @@ set -eo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHUNK_TRACE="$REPO_ROOT/extension/chunk_trace"
 EVICTION_XCOORD="$REPO_ROOT/extension/eviction_lfu_xcoord"
-SCHED_GPU_AWARE="$REPO_ROOT/extension/sched_gpu_aware"
+SCHED_GPU_AWARE="$REPO_ROOT/extension/sched_gpu_baseline"
 LLAMA_SERVER="$REPO_ROOT/workloads/llama.cpp/build/bin/llama-server"
 DATASET="$REPO_ROOT/workloads/llama.cpp/datasets/sharegpt_vicuna.json"
 VLLM_WORKDIR="$REPO_ROOT/workloads/vllm"
@@ -101,7 +101,7 @@ start_xcoord() {
     fi
     echo "  gpu_ext loaded (PID: $XCOORD_GPU_PID)"
 
-    echo "  Starting xCoord sched_ext side (sched_gpu_aware)..."
+    echo "  Starting xCoord sched_ext side (sched_gpu_baseline)..."
     sudo "$SCHED_GPU_AWARE" -t 1000 \
         > "$RESULTS_DIR/xcoord_cpu_${scenario}.log" 2>&1 &
     XCOORD_CPU_PID=$!
@@ -115,7 +115,7 @@ start_xcoord() {
 
 stop_xcoord() {
     if [ -n "$XCOORD_CPU_PID" ]; then
-        echo "  Stopping sched_gpu_aware..."
+        echo "  Stopping sched_gpu_baseline..."
         sudo kill $XCOORD_CPU_PID 2>/dev/null || true
         wait $XCOORD_CPU_PID 2>/dev/null || true
         XCOORD_CPU_PID=""

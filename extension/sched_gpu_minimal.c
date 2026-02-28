@@ -3,7 +3,7 @@
  * xCoord Minimal Policy: GPU-Aware sched_ext scheduler loader
  *
  * Minimal overhead variant — fewer hooks, no vtime tracking.
- * Identical CLI interface to sched_gpu_aware.
+ * Identical CLI interface to sched_gpu_baseline.
  */
 #include <stdio.h>
 #include <stdlib.h>

@@ -15,7 +15,7 @@
 #define XCOORD_GPU_STATE_PIN "/sys/fs/bpf/xcoord_gpu_state"
 #define XCOORD_UVM_WORKERS_PIN "/sys/fs/bpf/xcoord_uvm_workers"
 
-/* Maximum tracked GPU process PIDs (set by sched_gpu_aware loader -p flag) */
+/* Maximum tracked GPU process PIDs (set by sched_gpu_baseline loader -p flag) */
 #define XCOORD_MAX_GPU_PROCS 16
 
 /*
