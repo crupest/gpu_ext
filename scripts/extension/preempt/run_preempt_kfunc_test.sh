@@ -4,7 +4,7 @@
 # Uses the tool with sleep-delimited commands piped via subshell.
 # CUDA workloads are started at the right timing.
 set -o pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../../../extension"
 
 cleanup() {
     sudo pkill -f test_preempt_kfunc 2>/dev/null || true

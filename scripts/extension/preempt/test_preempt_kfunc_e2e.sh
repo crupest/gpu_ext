@@ -9,7 +9,7 @@
 # 5. Check stats
 
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../../../extension"
 
 echo "=== GPU Preempt kfunc E2E Test ==="
 

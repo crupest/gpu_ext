@@ -83,7 +83,7 @@ cmds = "sleep 999\n"  # keep stdin open
 tool_proc = subprocess.Popen(
     ["sudo", "./test_preempt_kfunc"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../extension")
+    cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../extension")
 )
 time.sleep(2)
 

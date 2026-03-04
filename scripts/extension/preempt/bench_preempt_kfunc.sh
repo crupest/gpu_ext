@@ -7,7 +7,7 @@
 # 3. Create/destroy CUDA contexts in a loop → fires struct_ops → triggers kfunc
 # 4. Read latency_samples map for precise per-call kfunc timing
 set -o pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../../../extension"
 
 N_PREEMPTS=${1:-10}
 echo "=== kfunc Preempt Latency Benchmark (N=$N_PREEMPTS) ==="

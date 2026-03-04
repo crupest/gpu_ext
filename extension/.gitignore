@@ -47,4 +47,7 @@ test_preempt_demo
 test_preempt_multi
 test_preempt_ioctl
 test_preempt_kfunc
+test_uprobe_preempt
+test_priority_demo
+test_cuda_launch
 test_timeslice_policy.py

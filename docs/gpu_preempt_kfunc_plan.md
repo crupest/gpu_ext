@@ -1073,9 +1073,146 @@ kworker/10:0   [010] kfunc preempt OK: hClient=0xc1d0003b hTsg=0x5c000013
 - 关键差异在**检测到执行的延迟**，不是 RM+GSP 本身
 
 **测试工具**：
-- `scripts/extension/bench_preempt_kfunc.py` — Python 自动化 kfunc 基准测试
-- `scripts/extension/bench_preempt_kfunc.sh` — Shell 版本（备用）
+- `scripts/extension/preempt/bench_preempt_kfunc.py` — Python 自动化 kfunc 基准测试
+- `scripts/extension/preempt/bench_preempt_kfunc.sh` — Shell 版本（备用）
 - `test_preempt_demo` — ioctl 路径基准测试（含 burst 模式）
+
+### 8.11 Sleepable uprobe 直接调用 kfunc 验证 (2026-03-04)
+
+**发现**：sleepable uprobe (`SEC("uprobe.s/...")`) 可以**直接调用** sleepable kfunc，无需 bpf_wq。
+
+**原理**：
+- uprobe 运行在进程上下文（process context），标记 `BPF_F_SLEEPABLE` 后可 sleep
+- kfunc 注册了 `BPF_PROG_TYPE_UNSPEC`（覆盖所有 prog type），uprobe 可以调用
+- 无需 struct_ops + bpf_wq 中间层
+
+**测试**：`extension/test_uprobe_preempt.bpf.c` + `test_uprobe_preempt.c`
+- uprobe hook `cuLaunchKernel` → 直接 `bpf_nv_gpu_preempt_tsg()` → 成功
+- 每次 `cuLaunchKernel` 调用精确触发 preempt
+
+**结果 (5 samples)**：
+```
+uprobe preempt OK: 276735 ns (277 us)
+uprobe preempt OK: 318187 ns (318 us)
+uprobe preempt OK: 320077 ns (320 us)
+uprobe preempt OK: 316094 ns (316 us)
+uprobe preempt OK: 328407 ns (328 us)
+→ avg=312 us, min=277 us, max=328 us
+```
+
+**三路径对比**：
+
+| 路径 | Avg | 触发时机 | bpf_wq | 架构复杂度 |
+|------|-----|---------|--------|-----------|
+| ioctl (userspace) | 354 us | 手动/polling | 不需要 | 高（ring buffer + userspace） |
+| struct_ops + bpf_wq + kfunc | 540 us | context 创建 | **需要** | 中（struct_ops + wq） |
+| **uprobe.s + kfunc** | **312 us** | **kernel launch** | **不需要** | **低（直接调用）** |
+
+**uprobe 路径优势**：
+1. **延迟最低** (312 us) — 无 bpf_wq kworker 调度开销
+2. **触发时机最精准** — hook `cuLaunchKernel`，在 GPU kernel 提交时 preempt
+3. **架构最简** — 不需要 struct_ops、bpf_wq、trigger map、重复计数
+4. **可 hook 任意 CUDA API** — `cuLaunchKernel`、`cuMemcpyAsync`、`cudaMalloc` 等
+
+**实际调度场景**：
+- uprobe 在 BE 进程的 `cuLaunchKernel` 上 → 检测 LC fault rate → 决定是否 preempt BE
+- 或 uprobe 在 LC 进程的 `cuLaunchKernel` 上 → 在 LC 提交 kernel 前先 preempt BE
+- 这实现了**精确到 kernel launch 粒度的 GPU preemption**
+
+### 8.12 优先级调度实验 (2026-03-04)
+
+#### 8.12.1 早期实验：per-launch preempt 反而变慢
+
+**实验 A: uprobe on LC's cuLaunchKernel → preempt BE (BE <<<512,256>>> loop)**
+
+| 配置 | LC avg | LC median | LC P99 |
+|------|--------|-----------|--------|
+| 无 preempt (baseline) | 323 us | 137 us | 2235 us |
+| **有 preempt** | **2427 us** | **2569 us** | **2502 us** |
+
+结果：LC **变慢 7.5x**。原因：
+- preempt 是**同步**的（280us kfunc call 阻塞 cuLaunchKernel 返回）
+- baseline 时 RTX 5090 硬件 compute preemption 已经很好地处理 SM 时间片
+- BE 用 512 blocks 只占 GPU 38% 容量 → LC 可以并行跑
+
+**实验 B: uprobe on BE's cuLaunchKernel → preempt BE (BE 占满 GPU)**
+
+| 配置 | LC avg | LC median | LC P99 |
+|------|--------|-----------|--------|
+| 无 preempt | 3069 us | 2340 us | 6680 us |
+| **有 preempt** | **4108 us** | **4290 us** | **8770 us** |
+
+结果：LC 仍然**变慢**。原因：
+- 每次 BE launch 都 preempt → BE 变慢 → GPU 占用时间更长 → LC 等更久
+- TSG preemption 是重量级操作（暂停/恢复整个 TSG context）
+
+**验证 preempt 确实生效**（test_preempt_demo 数据）：
+```
+无 preempt: BE kernel = 261678 us
+持续 preempt: BE kernel = 716415 us (+173.8%)
+preempt throughput: 5504 preempts/sec
+```
+→ TSG preempt 确实中断了 GPU 执行，但在上述场景中是一种惩罚而非优化。
+
+#### 8.12.2 修正实验：persistent kernel 占满 GPU
+
+**实验设计**：3 场景对比，分析 BPF preempt 在什么条件下有效。
+
+**为什么之前 preempt 反而变慢？**
+
+之前的实验中 BE 用 `<<<512, 256>>>` 只占 GPU 38% 容量（512 blocks / 1360 max），LC 可以在空闲 SM 上**并行**运行。RTX 5090 的硬件 compute preemption 在 SM 级别做 warp 交错（微秒级），远快于 BPF TSG preempt 的 300us 同步开销。结果：preempt 的 300us 开销 > 并行运行的 0us → LC 变慢。
+
+**正确的测试**：BE 必须**完全占满所有 SM**（persistent kernel 填满每个 SM slot），LC 才被迫等待硬件 timeslice。
+
+**三场景对比**：
+
+| 场景 | BE 模式 | LC Avg | LC Median | LC Max | LC P95 |
+|------|---------|--------|-----------|--------|--------|
+| S1: BE 部分占 GPU | `<<<512,256>>>` loop | 5184 us | 4960 us | 9542 us | 9542 us |
+| S2: BE **占满 GPU** | persistent, ALL SMs | 6141 us | 5802 us | **8302 us** | **8302 us** |
+| S3: S2 + **BPF preempt** | persistent + uprobe | **4389 us** | **4859 us** | **4899 us** | **4899 us** |
+
+**S2→S3 改善**：
+- **avg: -29%** (6141 → 4389 us)
+- **max: -41%** (8302 → 4899 us，消除尾延迟)
+- **P95: -41%** (8302 → 4899 us)
+- **方差: -66%** (spread 5240 → 1769 us，延迟更可预测)
+
+**关键分析**：
+
+1. **S1 的 LC 延迟高于预期** — `<<<512,256>>>` loop 模式下，BE 在 kernel 间有 gap（sync + relaunch），但 GPU 争抢仍然导致 5ms avg 延迟。这说明即使 GPU 有空闲 SM，TSG 级别的调度器也会造成延迟
+
+2. **S2 的 max=8302us** — 这是硬件 timeslice 的上界。当 BE persistent kernel 占满所有 SM，LC 必须等到 GPU 硬件 round-robin timeslice 轮转才能拿到 SM 时间。此延迟不可控
+
+3. **S3 消除了尾延迟** — BPF preempt 强制中断 BE 的 TSG，使 LC 不再受硬件 timeslice 随机性影响：
+   - max 从 8302us 降至 4899us（-41%）
+   - 方差大幅缩小（延迟可预测）
+   - 代价：preempt 同步开销 ~300us + TSG context switch ~4.5ms
+
+4. **S3 的双峰分布** — ~4860us（preempt + GPU context switch + kernel） vs ~3300us（BE 恰好在 yield 窗口）。4860us = 300us preempt + ~4500us GPU context switch 开销
+
+**BPF preempt 什么时候有效**：
+
+| 条件 | BPF preempt 效果 | 原因 |
+|------|-----------------|------|
+| BE 部分占 GPU | **无效/有害** | LC 可并行跑，preempt 300us 是纯开销 |
+| BE 占满 GPU + 短 timeslice | **中等** | 减少尾延迟，但 avg 改善有限 |
+| BE 占满 GPU + 长 timeslice | **显著** | LC 等待从 ms 级降至 preempt 开销 |
+| **UVM eviction** | **必要** | 唯一能释放 BE VRAM 页的方法 |
+| **QoS enforcement** | **有效** | 一次性惩罚超时 BE |
+
+**什么样的 kernel 场景最能体现 preempt 价值**：
+- **Persistent kernel**（占满所有 SM、长时间运行，如 CUDA Graph 循环）
+- **超长 kernel**（>10ms，如大矩阵乘法、推理 forward pass）
+- **Cooperative kernel**（grid sync 要求所有 SM 同时运行，不可被部分 preempt）
+- **UVM 场景**（BE 持有 VRAM 页，LC 需要 page migration）
+
+**测试程序**：`scripts/extension/preempt/test_priority_demo.cu`
+- `be` mode：persistent kernel 填满所有 SM（`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 计算 max blocks）
+- `be_loop` mode：loop 模式（kernel 间有 gap）
+- `lc` mode：短 kernel 延迟测量
+
+**脚本**：`scripts/extension/preempt/run_priority_demo.sh` — 自动化 3 场景对比
 
 ## 9. 参考文档
 
@@ -1090,7 +1227,11 @@ kworker/10:0   [010] kfunc preempt OK: hClient=0xc1d0003b hTsg=0x5c000013
 - `extension/test_preempt_multi.c` — 多 context 竞争测试（Test E/F）
 - `extension/test_preempt_kfunc.bpf.c` — kfunc 端到端测试 BPF（kprobe + struct_ops + bpf_wq）
 - `extension/test_preempt_kfunc.c` — kfunc 测试 loader（交互式 + 脚本化）
-- `scripts/extension/run_preempt_kfunc_test.sh` — 非交互式端到端测试脚本
-- `scripts/extension/bench_preempt_kfunc.py` — kfunc 延迟基准测试（自动化）
-- `scripts/extension/bench_preempt_kfunc.sh` — kfunc 延迟基准测试（shell 版）
+- `extension/test_uprobe_preempt.bpf.c` — sleepable uprobe 直接调用 kfunc 验证
+- `extension/test_uprobe_preempt.c` — uprobe preempt loader（支持 `-p PID` 过滤）
+- `scripts/extension/preempt/test_priority_demo.cu` — LC/BE 优先级调度 demo（CUDA 程序）
+- `scripts/extension/preempt/run_priority_demo.sh` — 优先级调度自动化测试脚本
+- `scripts/extension/preempt/run_preempt_kfunc_test.sh` — 非交互式端到端测试脚本
+- `scripts/extension/preempt/bench_preempt_kfunc.py` — kfunc 延迟基准测试（自动化）
+- `scripts/extension/preempt/bench_preempt_kfunc.sh` — kfunc 延迟基准测试（shell 版）
 - `extension/prefetch_cross_block_v2.bpf.c` — bpf_wq 使用模式参考
