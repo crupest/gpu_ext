@@ -245,53 +245,47 @@ kfunc 只需要 `hClient` 和 `hTsg` 两个参数（均为 NvU32），由 BPF kp
 
 #### 4.1 Step 1: RM 层新增内部 preempt 函数
 
-**文件**: `kernel-module/nvidia-module/src/nvidia/src/kernel/gpu/osapi.c`
+**文件**: `kernel-module/nvidia-module/src/nvidia/arch/nvalloc/unix/src/osapi.c`
 
-使用 `Nv04ControlWithSecInfo` 路径（已在 §8.1 实践验证），以内核特权级绕过 fd/client 安全检查：
+以内核特权级绕过 fd/client 安全检查，调用 `Nv04ControlWithSecInfo`：
 
 ```c
-NV_STATUS
-nv_gpu_sched_do_preempt(NvU32 hClient, NvU32 hTsg)
+NvU32 NV_API_CALL nv_gpu_sched_do_preempt(
+    nvidia_stack_t *sp, NvU32 hClient, NvU32 hTsg)
 {
-    NV_STATUS rmStatus;
-    THREAD_STATE_NODE threadState;
-    nvidia_stack_t *sp = NULL;
-
-    if (nv_kmem_cache_alloc_stack(&sp) != 0)
-        return NV_ERR_NO_MEMORY;
-
-    NV_ENTER_RM_RUNTIME(sp, fp);
-    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-
+    void *fp;
     NVOS54_PARAMETERS params = { 0 };
     NVA06C_CTRL_PREEMPT_PARAMS preemptParams = { 0 };
+    API_SECURITY_INFO secInfo = { 0 };
+
+    NV_ENTER_RM_RUNTIME(sp, fp);
+
     preemptParams.bWait = NV_TRUE;
     preemptParams.bManualTimeout = NV_TRUE;
     preemptParams.timeoutUs = 100000;
 
     params.hClient = hClient;
     params.hObject = hTsg;
-    params.cmd = NVA06C_CTRL_CMD_PREEMPT;  // 0xa06c0105
+    params.cmd = 0xa06c0105; /* NVA06C_CTRL_CMD_PREEMPT */
     params.params = NvP64_VALUE(&preemptParams);
     params.paramsSize = sizeof(preemptParams);
 
-    RS_PRIV_LEVEL privLevel = RS_PRIV_LEVEL_KERNEL;
-    RMAPI_PARAM_COPY paramCopy = { 0 };
-    rmStatus = Nv04ControlWithSecInfo(&params, &paramCopy, privLevel, NULL);
+    secInfo.privLevel = RS_PRIV_LEVEL_KERNEL;
+    secInfo.paramLocation = PARAM_LOCATION_KERNEL;
 
-    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+    Nv04ControlWithSecInfo(&params, secInfo);
+
     NV_EXIT_RM_RUNTIME(sp, fp);
-    nv_kmem_cache_free_stack(sp);
-
-    return rmStatus;
+    return params.status;
 }
-EXPORT_SYMBOL(nv_gpu_sched_do_preempt);
 ```
 
 **关键点**：
-- 使用 `RS_PRIV_LEVEL_KERNEL` 绕过 fd/client ownership 检查，实现跨进程 preempt
-- `NV_ENTER_RM_RUNTIME` + `threadStateInit` 是从 `kernel-open` 调用 RM 的标准模式
-- 需要在 `exports_link_command.txt` 和 `nv.h` 中添加导出声明
+- `RS_PRIV_LEVEL_KERNEL` 绕过 fd/client ownership 检查 → 跨进程 preempt
+- `PARAM_LOCATION_KERNEL` 告诉 RM 参数在内核空间（非 user pointer）
+- sp (nvidia_stack_t) 由 kfunc 分配，函数只做 RM runtime 包装
+- 不需要 threadState（与 escape.c 同级调用路径）
+- 在 `exports_link_command.txt` 中添加导出（不需要修改 nv.h，用 extern 前向声明）
 
 #### 4.2 Step 2: kfunc 注册
 
@@ -301,13 +295,22 @@ EXPORT_SYMBOL(nv_gpu_sched_do_preempt);
 
 ```c
 /* Forward declaration - implemented in nv-kernel.o (osapi.c) */
-extern NvU32 nv_gpu_sched_do_preempt(NvU32 hClient, NvU32 hTsg);
+extern NvU32 nv_gpu_sched_do_preempt(nvidia_stack_t *sp, NvU32 hClient, NvU32 hTsg);
 
 __bpf_kfunc int bpf_nv_gpu_preempt_tsg(u32 hClient, u32 hTsg)
 {
+    nvidia_stack_t *sp = NULL;
+    NvU32 status;
+
     if (!hClient || !hTsg)
         return -EINVAL;
-    return (int)nv_gpu_sched_do_preempt(hClient, hTsg);
+    if (nv_kmem_cache_alloc_stack(&sp) != 0)
+        return -ENOMEM;
+
+    status = nv_gpu_sched_do_preempt(sp, hClient, hTsg);
+    nv_kmem_cache_free_stack(sp);
+
+    return (status == 0) ? 0 : -EIO;
 }
 ```
 
@@ -323,160 +326,28 @@ BTF_ID_FLAGS(func, bpf_nv_gpu_preempt_tsg, KF_SLEEPABLE)
 BTF_KFUNCS_END(nv_gpu_sched_kfunc_ids_set)
 ```
 
-#### 4.3 Step 3: BPF 程序示例
+#### 4.3 Step 3: BPF 测试程序
 
-**新建文件**: `extension/gpu_sched_preempt.bpf.c`
+Handle 捕获使用已验证的 kprobe 3-probe 策略（见 §8.3），代码复用 `test_preempt_demo.bpf.c`。
+
+kfunc 调用通过 `bpf_wq` 实现（kprobe 是 non-sleepable 上下文）：
 
 ```c
-// SPDX-License-Identifier: GPL-2.0
-/*
- * gpu_sched_preempt.bpf.c - GPU TSG preemption via BPF kfunc
- *
- * Demonstrates using bpf_nv_gpu_preempt_tsg() kfunc to preempt
- * GPU TSGs directly from kernel BPF context, without userspace ioctl.
- *
- * Architecture:
- *   1. Tracepoints capture TSG handles (hClient, hTsg) at creation
- *   2. Userspace or BPF timer triggers preemption decision
- *   3. bpf_wq callback calls bpf_nv_gpu_preempt_tsg() [sleepable kfunc]
- *
- * Usage:
- *   sudo ./gpu_sched_preempt [-p PID] [-i interval_ms]
- *     -p PID: only preempt TSGs owned by this process
- *     -i ms:  periodic preemption interval (0 = manual trigger only)
- */
-
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-
-char LICENSE[] SEC("license") = "GPL";
-
-/* kfunc declarations */
+/* kfunc 声明 */
 extern int bpf_nv_gpu_preempt_tsg(u32 hClient, u32 hTsg) __ksym;
 
-/* TSG tracking */
-struct tsg_entry {
-    u32 hClient;
-    u32 hTsg;
-    u32 pid;
-    u64 create_time;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 256);
-    __type(key, u32);               /* hTsg */
-    __type(value, struct tsg_entry);
-} tsg_map SEC(".maps");
-
-/* Preempt request queue (populated by userspace or timer) */
-struct preempt_req {
-    u32 hClient;
-    u32 hTsg;
-    struct bpf_wq work;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 64);
-    __type(key, u32);
-    __type(value, struct preempt_req);
-} preempt_wq_map SEC(".maps");
-
-/* Stats */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 4);
-    __type(key, u32);
-    __type(value, u64);
-} stats SEC(".maps");
-
-enum { STAT_PREEMPT_OK = 0, STAT_PREEMPT_FAIL = 1, STAT_TSG_TRACK = 2 };
-
-/* bpf_wq callback: execute preemption in sleepable context */
-static int do_preempt(void *map, int *key, void *value)
+/* bpf_wq callback: sleepable 上下文中调用 kfunc */
+static int do_preempt_wq(void *map, int *key, void *val)
 {
-    struct preempt_req *req = value;
-    int ret;
-    u32 stat_key;
-    u64 *cnt;
-
-    if (!req->hClient || !req->hTsg)
-        return 0;
-
-    ret = bpf_nv_gpu_preempt_tsg(req->hClient, req->hTsg);
-
-    stat_key = (ret == 0) ? STAT_PREEMPT_OK : STAT_PREEMPT_FAIL;
-    cnt = bpf_map_lookup_elem(&stats, &stat_key);
-    if (cnt)
-        __sync_fetch_and_add(cnt, 1);
-
-    return 0;
+    struct preempt_req *req = val;
+    return bpf_nv_gpu_preempt_tsg(req->hClient, req->hTsg);
 }
 
-/* Tracepoint: capture TSG creation */
-struct trace_tsg_create {
-    u64 __pad;
-    u32 hClient;
-    u32 hTsg;
-    u64 tsg_id;
-    u32 engine_type;
-    u64 timeslice_us;
-    u32 interleave_level;
-    u32 runlist_id;
-    u32 gpu_instance;
-    u32 pid;
-};
-
-SEC("tracepoint/nvidia/nvidia_gpu_tsg_create")
-int handle_tsg_create(struct trace_tsg_create *ctx)
-{
-    struct tsg_entry entry = {};
-    u32 hTsg = ctx->hTsg;
-    u32 stat_key = STAT_TSG_TRACK;
-    u64 *cnt;
-
-    entry.hClient = ctx->hClient;
-    entry.hTsg = ctx->hTsg;
-    entry.pid = bpf_get_current_pid_tgid() >> 32;
-    entry.create_time = bpf_ktime_get_ns();
-
-    bpf_map_update_elem(&tsg_map, &hTsg, &entry, BPF_ANY);
-
-    cnt = bpf_map_lookup_elem(&stats, &stat_key);
-    if (cnt)
-        __sync_fetch_and_add(cnt, 1);
-
-    return 0;
-}
-
-/* Tracepoint: cleanup on TSG destroy */
-struct trace_tsg_destroy {
-    u64 __pad;
-    u32 hClient;
-    u32 hTsg;
-    u64 tsg_id;
-    u32 pid;
-};
-
-SEC("tracepoint/nvidia/nvidia_gpu_tsg_destroy")
-int handle_tsg_destroy(struct trace_tsg_destroy *ctx)
-{
-    u32 hTsg = ctx->hTsg;
-    bpf_map_delete_elem(&tsg_map, &hTsg);
-    return 0;
-}
+/* 在 kprobe/kretprobe 中捕获到 TSG 后，触发 bpf_wq */
+// bpf_wq_init(&req->work, &wq_map, 0);
+// bpf_wq_set_callback(&req->work, do_preempt_wq, 0);
+// bpf_wq_start(&req->work, 0);
 ```
-
-#### 4.4 Step 4: Loader 程序
-
-**新建文件**: `extension/gpu_sched_preempt.c`
-
-Loader 负责：
-1. 加载 BPF 程序和 attach tracepoints
-2. 提供命令行接口触发 preempt（写入 preempt_wq_map → 触发 bpf_wq）
-3. 显示统计信息
 
 ### Phase 2（可选）: 添加 `on_sched_tick` sleepable hook
 
@@ -501,18 +372,7 @@ Loader 负责：
 | `kernel-open/nvidia/nv-gpu-sched-hooks.c` | 修改 | 添加 `bpf_nv_gpu_preempt_tsg` kfunc 定义和注册 |
 | `src/nvidia/exports_link_command.txt` + `nv.h` | 修改 | 导出 `nv_gpu_sched_do_preempt` 符号 |
 
-**不需要修改的文件**（handle 捕获由 BPF kprobe 完成）：
-- ~~`nv-gpu-sched-hooks.h`~~ — 不需要新增 context struct 字段
-- ~~`kernel_channel_group.c` / `kernel_channel_group_api.c`~~ — 不需要修改 hook 调用点
-- ~~`escape.c`~~ — kfunc 绕过 ioctl，不需要安全检查 bypass
-
-**BPF 程序（extension 目录）**：
-
-| 文件 | 操作 | 内容 |
-|------|------|------|
-| `extension/gpu_sched_preempt.bpf.c` | 新建 | BPF 程序：kprobe handle 捕获 + bpf_wq + preempt kfunc |
-| `extension/gpu_sched_preempt.c` | 新建 | Loader 程序 |
-| `extension/Makefile` | 修改 | 添加编译目标 |
+Handle 捕获由 BPF kprobe 完成（零内核修改，见 §8.3）。`nv-gpu-sched-hooks.h`、`kernel_channel_group*.c`、`escape.c` 均不需要修改。
 
 ## 6. 风险与注意事项
 
@@ -1070,14 +930,152 @@ Phase 2 (持续 preempt B):
 2. **多 context 场景下 preempt 有明确收益**：可实现优先级调度（优先任务获得更多 GPU 时间）和延迟保护（latency-sensitive 任务不被 throughput 任务阻塞）
 3. **零内核修改**：所有功能在 stock nvidia module 上实现
 
-### 8.7 TODO
+### 8.7 kfunc 实现（最小修改版）(2026-03-04)
+
+从干净的 `test-sched` 分支重新实现，仅 3 处修改（初版的多余修改已全部不需要）：
+
+**修改 1: `src/nvidia/arch/nvalloc/unix/src/osapi.c`**
+- 新增 `nv_gpu_sched_do_preempt(sp, hClient, hTsg)`
+- 走 `NV_ENTER_RM_RUNTIME` → `Nv04ControlWithSecInfo(RS_PRIV_LEVEL_KERNEL)` 路径
+- 不使用 threadState（跟 escape.c 同级别调用，不需要）
+- `PARAM_LOCATION_KERNEL` 表明参数在内核空间
+- 新增 `#include <ctrl/ctrla06c.h>` 获取 preempt 参数类型
+
+**修改 2: `kernel-open/nvidia/nv-gpu-sched-hooks.c`**
+- 新增 `bpf_nv_gpu_preempt_tsg(hClient, hTsg)` kfunc
+- 在 `__bpf_kfunc_start_defs()` / `__bpf_kfunc_end_defs()` 之间
+- BTF 注册：`BTF_ID_FLAGS(func, bpf_nv_gpu_preempt_tsg, KF_SLEEPABLE)`
+- kfunc 负责 `nv_kmem_cache_alloc_stack` / `free_stack`，osapi 函数接收 sp 参数
+- `extern NvU32 nv_gpu_sched_do_preempt(nvidia_stack_t *sp, NvU32, NvU32)` 前向声明
+
+**修改 3: `src/nvidia/exports_link_command.txt`**
+- 新增 `--undefined=nv_gpu_sched_do_preempt`
+- 无需修改 nv.h（使用 extern 前向声明即可）
+
+**验证结果**：
+- [x] `make -j$(nproc) modules` 编译成功（仅重编译 osapi.c + nv-gpu-sched-hooks.o）
+- [x] 三个模块加载成功（nvidia + nvidia-modeset + nvidia-uvm）
+- [x] `dmesg`: "nvidia: GPU sched struct_ops initialized"
+- [x] `kallsyms`: `bpf_nv_gpu_preempt_tsg` 和 `nv_gpu_sched_do_preempt` 均可见
+- [x] **kfunc 端到端测试** ✅ 详见 §8.9
+
+### 8.8 TODO
 
 1. ~~多 TSG 竞争测试~~ ✅ Test E + Test F 完成（同进程 ioctl 验证）
-2. **撤回多余内核修改** — 仅保留 osapi.c + nv-gpu-sched-hooks.c + exports 三处
-3. **kfunc 端到端测试** — BPF 程序 → bpf_wq → `bpf_nv_gpu_preempt_tsg()` → RM → GSP → preempt
-4. **跨进程 preempt 验证** — kfunc 的核心价值：从 BPF 程序 preempt 不同进程的 TSG
-5. **集成到 BPF 调度策略** — 在 UVM eviction/prefetch hooks 中通过 bpf_wq 调用 kfunc preempt
-6. **动态 preempt 策略** — 根据 fault rate / QoS 信号自动决定 preempt 目标和频率
+2. ~~撤回多余内核修改~~ ✅ 从干净分支重新实现，仅 3 处修改
+3. ~~kfunc 编译 + 加载~~ ✅ 模块编译成功，kfunc 注册到 kallsyms
+4. ~~kfunc 端到端测试~~ ✅ BPF → bpf_wq → kfunc → RM → GSP → preempt 全链路验证
+5. ~~跨进程 preempt 验证~~ ✅ CUDA-A 的 TSG 被 CUDA-B 触发的 struct_ops → bpf_wq → kfunc 成功 preempt
+6. **集成到 BPF 调度策略** — 在 UVM eviction/prefetch hooks 中通过 bpf_wq 调用 kfunc preempt
+7. **动态 preempt 策略** — 根据 fault rate / QoS 信号自动决定 preempt 目标和频率
+
+### 8.9 kfunc 端到端测试验证 (2026-03-04)
+
+**测试程序**: `extension/test_preempt_kfunc.bpf.c` + `test_preempt_kfunc.c`
+
+**架构**（解决 kprobe 不能使用 bpf_wq 的限制）：
+- **kprobe 层**（non-sleepable）：3-probe 策略捕获 hClient/hTsg handles
+  - kprobe/nvidia_unlocked_ioctl → 拦截 TSG alloc (class 0xa06c)
+  - kprobe/nv_gpu_sched_task_init → 捕获 tsg_id + engine_type
+  - kretprobe/nvidia_unlocked_ioctl → 从 user-space NVOS21 读取 hTsg
+- **struct_ops 层**（支持 bpf_wq）：on_task_init/on_bind 检查 trigger map → bpf_wq → kfunc
+- **共享 maps**：tsg_map（handles）、trigger（触发信号）、stats（统计）
+
+**关键发现**：
+- `bpf_wq_init()` 必须在 `bpf_wq_set_callback_impl()` 之前调用，否则返回 -EINVAL
+- kprobe 程序不能使用 bpf_wq（"tracing progs cannot use bpf_wq yet"）
+- struct_ops 程序可以使用 bpf_wq，且与 kprobe 在同一 BPF 对象中共存
+- `BPF_PROG` 宏内部使用 `ctx` 作为第一个参数名，struct_ops 参数不能命名为 `ctx`
+
+**测试流程**：
+1. 加载 BPF（kprobes + struct_ops 同时注册）
+2. 启动 CUDA-A → kprobes 捕获 3 个 TSG（engine 1=GRAPHICS, 13=NVJPEG, 14=OFA）
+3. 用户 arm trigger（trigger[0] = tsg_idx + 1）
+4. 启动 CUDA-B → struct_ops on_task_init 触发 → check trigger → bpf_wq → kfunc
+5. kworker 执行 `bpf_nv_gpu_preempt_tsg(hClient, hTsg)` → RM dispatch → GSP → 成功
+
+**结果**：
+```
+tsg_captured: 6   (3 from CUDA-A, 3 from CUDA-B)
+preempt_ok:   1   ← kfunc 成功 preempt CUDA-A 的 GRAPHICS TSG
+preempt_err:  0
+wq_fired:     1
+struct_ops:   14
+```
+
+**trace_pipe 关键日志**：
+```
+python3-131060 [010] check_trigger: trig=1 tsg_idx=0
+python3-131060 [010] trigger: wq_set_callback ret=0
+python3-131060 [010] trigger: wq_start ret=0 hClient=0xc1d0003b hTsg=0x5c000013
+kworker/10:0   [010] kfunc preempt OK: hClient=0xc1d0003b hTsg=0x5c000013
+```
+
+**跨进程 preempt 确认**：
+- CUDA-A PID=130830 创建的 TSG（hClient=0xc1d0003b, hTsg=0x5c000013）
+- 被 CUDA-B PID=131060 触发的 struct_ops → bpf_wq → kfunc 成功 preempt
+- 使用 RS_PRIV_LEVEL_KERNEL 绕过 RM ownership 检查，实现真正的跨进程 preempt
+
+### 8.10 kfunc vs ioctl 延迟对比基准测试 (2026-03-04)
+
+**测试方法**：
+- 创建目标 CUDA 上下文（target TSG），然后反复 preempt 同一 TSG
+- kfunc 路径：bpf_wq callback 中 `bpf_ktime_get_ns()` 精确计时 kfunc 调用
+- ioctl 路径：`test_preempt_demo` 使用 `clock_gettime(CLOCK_MONOTONIC)` 计时
+- 每次 preempt 之间有 0.3-0.5s 间隔，避免 bpf_wq 竞态
+
+**kfunc 路径延迟 (31 samples, bpf_wq → kfunc → RM → GSP)**：
+```
+排除冷启动 (首次 50ms):
+  N=30, avg=540 us, median=206 us, min=147 us, max=1380 us
+
+双峰分布:
+  低延迟带 (<400us): N=17, avg=177 us    ← GSP 已空闲时
+  高延迟带 (≥400us): N=13, avg=1014 us   ← GSP 忙碌/上下文切换
+```
+
+**ioctl 路径延迟 (test_preempt_demo)**：
+```
+标准模式 (10 rounds): avg=354 us, min=313 us, max=398 us
+突发模式 (100x rapid): avg=181 us/preempt, throughput=5519 preempts/sec
+```
+
+**对比总结**：
+
+| 路径 | Avg | Min | Max | 说明 |
+|------|-----|-----|-----|------|
+| ioctl (标准) | 354 us | 313 us | 398 us | userspace→ioctl→RM→GSP |
+| ioctl (突发) | 181 us | — | — | 100x 连续 rapid preempt |
+| kfunc (全部,warm) | 540 us | 147 us | 1380 us | bpf_wq→kfunc→RM→GSP |
+| kfunc (低延迟带) | 177 us | 147 us | 207 us | GSP 空闲时，纯 RM+GSP |
+| kfunc (高延迟带) | 1014 us | 772 us | 1380 us | GSP 忙碌/上下文切换 |
+
+**关键发现**：
+
+1. **kfunc 低延迟带 (177us) 比 ioctl 标准 (354us) 快 2x** — 消除了 userspace→kernel 往返
+2. **kfunc 有明显双峰分布** — GSP 状态决定了延迟是 ~177us 还是 ~1014us
+3. **ioctl 突发模式 (181us) 接近 kfunc 低延迟带** — 连续 ioctl 时 GSP 保持热状态
+4. **bpf_wq 调度开销极小** — wq_ns ≈ kfunc_ns（差距 <20ns），几乎全是 RM+GSP RPC 时间
+5. **首次调用有冷启动惩罚** — 第一次 kfunc 调用 50ms，之后稳定在 147-1380us
+
+**为什么 kfunc avg (540us) > ioctl avg (354us)?**
+- ioctl 测试有 **持续运行的 GPU kernel**（baseline iteration ~260ms），GPU 一直在工作
+- kfunc 测试的 target 是**空闲 CUDA context**（无 running kernel）
+- 当 target TSG 无 running kernel 时，preempt 仍然走完 RM→GSP 路径但有更多变数
+- 双峰分布说明 GSP firmware 内部状态（是否有活跃调度）影响 preempt 延迟
+- **公平对比应看 kfunc 低延迟带 (177us) vs ioctl 标准 (354us) = 2x 提升**
+
+**kfunc 的真正价值**：
+- 不是绝对延迟更低（RM→GSP RPC 是固定开销）
+- 而是**消除 userspace 往返 + ring buffer poll 延迟**
+- 在 BPF 策略中，检测到需要 preempt → bpf_wq → kfunc，全程内核态
+- 对比 ioctl 路径：检测 → ring buffer → userspace poll → ioctl → kernel → RM → GSP
+- 关键差异在**检测到执行的延迟**，不是 RM+GSP 本身
+
+**测试工具**：
+- `scripts/extension/bench_preempt_kfunc.py` — Python 自动化 kfunc 基准测试
+- `scripts/extension/bench_preempt_kfunc.sh` — Shell 版本（备用）
+- `test_preempt_demo` — ioctl 路径基准测试（含 burst 模式）
 
 ## 9. 参考文档
 
@@ -1090,4 +1088,9 @@ Phase 2 (持续 preempt B):
 - `extension/gpu_preempt.h` — preempt 机制公共头文件（handle 捕获 + ioctl 封装）
 - `extension/test_preempt_demo.bpf.c` — BPF 3-probe handle 捕获策略
 - `extension/test_preempt_multi.c` — 多 context 竞争测试（Test E/F）
+- `extension/test_preempt_kfunc.bpf.c` — kfunc 端到端测试 BPF（kprobe + struct_ops + bpf_wq）
+- `extension/test_preempt_kfunc.c` — kfunc 测试 loader（交互式 + 脚本化）
+- `scripts/extension/run_preempt_kfunc_test.sh` — 非交互式端到端测试脚本
+- `scripts/extension/bench_preempt_kfunc.py` — kfunc 延迟基准测试（自动化）
+- `scripts/extension/bench_preempt_kfunc.sh` — kfunc 延迟基准测试（shell 版）
 - `extension/prefetch_cross_block_v2.bpf.c` — bpf_wq 使用模式参考
