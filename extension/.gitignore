@@ -35,4 +35,16 @@ prefetch_stride
 eviction_lfu_xcoord
 eviction_cycle_moe
 sched_gpu_baseline
+sched_gpu_minimal
+sched_gpu_serving
+sched_gpu_coord
+sched_gpu_xcoord
+sched_gpu_xcoord_noad
+prefetch_always_max_qos
+prefetch_always_max_xcoord
+prefetch_proactive_layer
+test_preempt_demo
+test_preempt_multi
+test_preempt_ioctl
+test_preempt_kfunc
 test_timeslice_policy.py
