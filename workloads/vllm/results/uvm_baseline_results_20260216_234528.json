@@ -1,0 +1,37 @@
+{
+  "test_info": {
+    "timestamp": "2026-02-16T23:45:28.469023",
+    "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json --sharegpt-output-len 512 --seed 42 --request-rate 5",
+    "model": "Qwen/Qwen3-30B-A3B-FP8"
+  },
+  "results": {
+    "cpu_offload": {
+      "successful_requests": 100,
+      "benchmark_duration": 140.51,
+      "total_input_tokens": 23501,
+      "total_generated_tokens": 51101,
+      "request_throughput": 0.71,
+      "output_token_throughput": 363.68,
+      "peak_output_token_throughput": 500.0,
+      "peak_concurrent_requests": 100.0,
+      "total_token_throughput": 530.94,
+      "mean_ttft": 1119.75,
+      "median_ttft": 790.23,
+      "p99_ttft": 3021.7,
+      "mean_tpot": 230.06,
+      "median_tpot": 229.73,
+      "p99_tpot": 239.29,
+      "mean_itl": 230.07,
+      "median_itl": 214.46,
+      "p99_itl": 797.69,
+      "success": true,
+      "config_name": "cpu_offload",
+      "config_display_name": "CPU Offload (8GB)",
+      "total_time": 160.21778750419617,
+      "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json --sharegpt-output-len 512 --seed 42 --request-rate 5",
+      "timestamp": "2026-02-16T23:45:25.448780",
+      "client_log": "results/logs/20260216_234225_cpu_offload_client.log",
+      "server_log": "results/logs/20260216_234225_cpu_offload_server.log"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "dataset": "random",
+  "propagation": "spmm",
+  "epochs": 3,
+  "warmup": 1,
+  "hidden_dim": 256,
+  "avg_epoch_time_s": 0.1414163907368978,
+  "median_epoch_time_s": 0.14125585556030273,
+  "total_time_s": 0.42424917221069336,
+  "accuracy": {
+    "train": 0.10594
+  },
+  "memory": {
+    "gpu_allocated_GB": 1.539655168,
+    "cpu_used_GB": 1.65617664,
+    "total_GB": 3.195831808
+  },
+  "use_uvm": false,
+  "seed": 2025
+}

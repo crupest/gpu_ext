@@ -1,0 +1,20 @@
+{
+  "dataset": "random",
+  "propagation": "chunked",
+  "epochs": 2,
+  "warmup": 1,
+  "hidden_dim": 256,
+  "avg_epoch_time_s": 69.8678857088089,
+  "median_epoch_time_s": 69.90697598457336,
+  "total_time_s": 139.7357714176178,
+  "accuracy": {
+    "train": 0.100651
+  },
+  "memory": {
+    "gpu_allocated_GB": 11.02865744,
+    "cpu_used_GB": 1.611423744,
+    "total_GB": 12.640081184
+  },
+  "use_uvm": true,
+  "seed": 2025
+}

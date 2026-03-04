@@ -1,0 +1,37 @@
+{
+  "test_info": {
+    "timestamp": "2025-12-08T02:26:31.920282",
+    "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path /home/yunwei37/workspace/gpu/schedcp/workloads/vllm/datasets/ShareGPT_V3_unfiltered_cleaned_split.json --seed 42 --request-rate 5",
+    "model": "Qwen/Qwen3-30B-A3B-FP8"
+  },
+  "results": {
+    "lmcache": {
+      "successful_requests": 100,
+      "benchmark_duration": 80.87,
+      "total_input_tokens": 21566,
+      "total_generated_tokens": 25066,
+      "request_throughput": 1.24,
+      "output_token_throughput": 309.97,
+      "peak_output_token_throughput": 654.0,
+      "peak_concurrent_requests": 71.0,
+      "total_token_throughput": 576.65,
+      "mean_ttft": 268.11,
+      "median_ttft": 236.84,
+      "p99_ttft": 554.53,
+      "mean_tpot": 108.87,
+      "median_tpot": 109.21,
+      "p99_tpot": 146.28,
+      "mean_itl": 95.83,
+      "median_itl": 96.46,
+      "p99_itl": 278.27,
+      "success": true,
+      "config_name": "lmcache",
+      "config_display_name": "LMCache",
+      "total_time": 88.38016724586487,
+      "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path /home/yunwei37/workspace/gpu/schedcp/workloads/vllm/datasets/ShareGPT_V3_unfiltered_cleaned_split.json --seed 42 --request-rate 5",
+      "timestamp": "2025-12-08T02:26:28.904015",
+      "client_log": "results/logs/20251208_022435_lmcache_client.log",
+      "server_log": "results/logs/20251208_022435_lmcache_server.log"
+    }
+  }
+}

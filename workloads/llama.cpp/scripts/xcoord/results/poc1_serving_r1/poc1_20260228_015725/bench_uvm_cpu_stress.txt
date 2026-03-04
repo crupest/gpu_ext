@@ -1,0 +1,62 @@
+INFO 02-28 02:00:43 [__init__.py:216] Automatically detected platform cuda.
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x77b5ff4bd360>, seed=0, num_prompts=20, dataset_name='sharegpt', no_stream=False, dataset_path='/home/yunwei37/workspace/gpu/gpu_ext/workloads/llama.cpp/datasets/sharegpt_vicuna.json', no_oversample=False, custom_output_len=256, custom_skip_chat_template=False, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 0}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='openai', endpoint_type=None, base_url='http://127.0.0.1:8013', host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=1, model='ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4', tokenizer='Qwen/Qwen3-30B-A3B-FP8', use_beam_search=False, logprobs=None, request_rate=0.2, burstiness=1.0, trust_remote_code=False, disable_tqdm=False, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics='ttft,tpot,itl', metric_percentiles='99', goodput=None, request_id_prefix='benchmark-serving', top_p=None, top_k=None, min_p=None, temperature=None, tokenizer_mode='auto', served_model_name=None, lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=600)
+Starting initial single prompt test run...
+Waiting for endpoint to become up in 600 seconds
+Initial test run completed. Starting main benchmark run...
+Traffic request rate: 0.2
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 1
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     20        
+Maximum request concurrency:             1         
+Request rate configured (RPS):           0.20      
+Benchmark duration (s):                  102.75    
+Total input tokens:                      4270      
+Total generated tokens:                  5065      
+Request throughput (req/s):              0.19      
+Output token throughput (tok/s):         49.29     
+Peak output token throughput (tok/s):    260.00    
+Peak concurrent requests:                4.00      
+Total Token throughput (tok/s):          90.85     
+---------------Time to First Token----------------
+Mean TTFT (ms):                          63.25     
+Median TTFT (ms):                        56.95     
+P99 TTFT (ms):                           153.49    
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          4.71      
+Median TPOT (ms):                        4.76      
+P99 TPOT (ms):                           6.31      
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           4.56      
+Median ITL (ms):                         3.87      
+P99 ITL (ms):                            8.15      
+==================================================
+warning: `VIRTUAL_ENV=/home/yunwei37/workspace/gpu/gpu_ext/workloads/llama.cpp/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+
+ |          | 00:00 elapsed, ? remaining
+ |          | 00:00 elapsed, 00:00 remaining
+ |          | 00:00 elapsed, 7:40:25 remaining
+
+  0%|          | 0/20 [00:00<?, ?it/s]
+  5%|▌         | 1/20 [00:04<01:18,  4.15s/it]
+ 10%|█         | 2/20 [00:12<02:03,  6.88s/it]
+ 15%|█▌        | 3/20 [00:14<01:12,  4.25s/it]
+ 20%|██        | 4/20 [00:17<01:02,  3.88s/it]
+ 25%|██▌       | 5/20 [00:19<00:47,  3.15s/it]
+ 30%|███       | 6/20 [00:26<01:04,  4.59s/it]
+ 35%|███▌      | 7/20 [00:26<00:40,  3.13s/it]
+ 40%|████      | 8/20 [00:35<00:58,  4.85s/it]
+ 45%|████▌     | 9/20 [00:49<01:26,  7.87s/it]
+ 50%|█████     | 10/20 [00:53<01:04,  6.46s/it]
+ 55%|█████▌    | 11/20 [00:58<00:55,  6.19s/it]
+ 60%|██████    | 12/20 [01:03<00:45,  5.67s/it]
+ 65%|██████▌   | 13/20 [01:05<00:32,  4.61s/it]
+ 70%|███████   | 14/20 [01:17<00:41,  6.89s/it]
+ 75%|███████▌  | 15/20 [01:17<00:24,  4.86s/it]
+ 80%|████████  | 16/20 [01:18<00:14,  3.64s/it]
+ 85%|████████▌ | 17/20 [01:19<00:08,  2.87s/it]
+ 90%|█████████ | 18/20 [01:26<00:08,  4.07s/it]
+ 95%|█████████▌| 19/20 [01:31<00:04,  4.42s/it]
+100%|██████████| 20/20 [01:42<00:00,  6.44s/it]
+100%|██████████| 20/20 [01:42<00:00,  5.14s/it]

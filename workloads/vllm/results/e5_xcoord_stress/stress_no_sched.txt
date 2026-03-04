@@ -1,0 +1,37 @@
+warning: `VIRTUAL_ENV=/home/yunwei37/workspace/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+INFO 02-28 21:21:21 [__init__.py:216] Automatically detected platform cuda.
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7ac12a8d5ab0>, seed=0, num_prompts=50, dataset_name='sharegpt', no_stream=False, dataset_path='datasets/ShareGPT_V3_unfiltered_cleaned_split.json', no_oversample=False, custom_output_len=256, custom_skip_chat_template=False, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 0}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='openai', endpoint_type=None, base_url='http://127.0.0.1:8000', host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=4, model='Qwen/Qwen3-30B-A3B-FP8', tokenizer=None, use_beam_search=False, logprobs=None, request_rate=2.0, burstiness=1.0, trust_remote_code=False, disable_tqdm=False, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics='ttft,tpot,itl', metric_percentiles='99', goodput=None, request_id_prefix='benchmark-serving', top_p=None, top_k=None, min_p=None, temperature=None, tokenizer_mode='auto', served_model_name=None, lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=600)
+Starting initial single prompt test run...
+Waiting for endpoint to become up in 600 seconds
+ |          | 00:00 elapsed, ? remaining |          | 00:00 elapsed, 00:00 remaining |          | 00:03 elapsed, 46:59:25 remaining
+Initial test run completed. Starting main benchmark run...
+Traffic request rate: 2.0
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 4
+  0%|          | 0/50 [00:00<?, ?it/s]  2%|▏         | 1/50 [00:03<03:07,  3.82s/it]  4%|▍         | 2/50 [00:06<02:40,  3.35s/it]  6%|▌         | 3/50 [00:07<01:39,  2.12s/it]  8%|▊         | 4/50 [00:07<01:03,  1.39s/it] 10%|█         | 5/50 [00:08<00:48,  1.08s/it] 12%|█▏        | 6/50 [00:08<00:33,  1.30it/s] 14%|█▍        | 7/50 [00:10<00:53,  1.24s/it] 16%|█▌        | 8/50 [00:13<01:10,  1.69s/it] 18%|█▊        | 9/50 [00:20<02:15,  3.30s/it] 20%|██        | 10/50 [00:21<01:47,  2.70s/it] 22%|██▏       | 11/50 [00:23<01:39,  2.55s/it] 24%|██▍       | 12/50 [00:24<01:10,  1.86s/it] 26%|██▌       | 13/50 [00:25<01:02,  1.69s/it] 28%|██▊       | 14/50 [00:28<01:21,  2.26s/it] 30%|███       | 15/50 [00:29<00:58,  1.67s/it] 32%|███▏      | 16/50 [00:30<00:49,  1.45s/it] 34%|███▍      | 17/50 [00:30<00:35,  1.09s/it] 36%|███▌      | 18/50 [00:33<00:54,  1.71s/it] 38%|███▊      | 19/50 [00:38<01:21,  2.62s/it] 40%|████      | 20/50 [00:38<01:00,  2.00s/it] 42%|████▏     | 21/50 [00:39<00:49,  1.71s/it] 44%|████▍     | 22/50 [00:41<00:44,  1.60s/it] 46%|████▌     | 23/50 [00:41<00:31,  1.18s/it] 48%|████▊     | 24/50 [00:42<00:28,  1.11s/it] 50%|█████     | 25/50 [00:45<00:39,  1.58s/it] 52%|█████▏    | 26/50 [00:45<00:27,  1.15s/it] 54%|█████▍    | 27/50 [00:46<00:30,  1.32s/it] 56%|█████▌    | 28/50 [00:47<00:22,  1.03s/it] 58%|█████▊    | 29/50 [00:48<00:26,  1.25s/it] 60%|██████    | 30/50 [00:50<00:25,  1.25s/it] 62%|██████▏   | 31/50 [00:54<00:40,  2.15s/it] 64%|██████▍   | 32/50 [00:54<00:28,  1.57s/it] 66%|██████▌   | 33/50 [00:55<00:20,  1.21s/it] 68%|██████▊   | 34/50 [00:58<00:29,  1.82s/it] 70%|███████   | 35/50 [01:01<00:34,  2.27s/it] 72%|███████▏  | 36/50 [01:02<00:24,  1.74s/it] 74%|███████▍  | 37/50 [01:03<00:19,  1.53s/it] 76%|███████▌  | 38/50 [01:04<00:15,  1.33s/it] 80%|████████  | 40/50 [01:05<00:10,  1.07s/it] 82%|████████▏ | 41/50 [01:10<00:17,  1.90s/it] 84%|████████▍ | 42/50 [01:11<00:14,  1.78s/it] 86%|████████▌ | 43/50 [01:12<00:10,  1.51s/it] 88%|████████▊ | 44/50 [01:12<00:07,  1.20s/it] 90%|█████████ | 45/50 [01:13<00:05,  1.00s/it] 92%|█████████▏| 46/50 [01:13<00:03,  1.11it/s] 94%|█████████▍| 47/50 [01:14<00:02,  1.37it/s] 96%|█████████▌| 48/50 [01:18<00:03,  1.86s/it] 98%|█████████▊| 49/50 [01:19<00:01,  1.47s/it]100%|██████████| 50/50 [01:19<00:00,  1.18s/it]100%|██████████| 50/50 [01:19<00:00,  1.59s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     50        
+Maximum request concurrency:             4         
+Request rate configured (RPS):           2.00      
+Benchmark duration (s):                  79.71     
+Total input tokens:                      12332     
+Total generated tokens:                  10349     
+Request throughput (req/s):              0.63      
+Output token throughput (tok/s):         129.83    
+Peak output token throughput (tok/s):    140.00    
+Peak concurrent requests:                7.00      
+Total Token throughput (tok/s):          284.54    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          58.78     
+Median TTFT (ms):                        57.89     
+P99 TTFT (ms):                           70.89     
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          29.53     
+Median TPOT (ms):                        29.52     
+P99 TPOT (ms):                           29.90     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           29.53     
+Median ITL (ms):                         29.46     
+P99 ITL (ms):                            31.24     
+==================================================

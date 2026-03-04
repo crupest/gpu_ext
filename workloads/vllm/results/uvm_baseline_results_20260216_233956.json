@@ -1,0 +1,37 @@
+{
+  "test_info": {
+    "timestamp": "2026-02-16T23:39:56.630492",
+    "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json --sharegpt-output-len 512 --seed 42 --request-rate 5",
+    "model": "Qwen/Qwen3-30B-A3B-FP8"
+  },
+  "results": {
+    "uvm_baseline": {
+      "successful_requests": 100,
+      "benchmark_duration": 561.19,
+      "total_input_tokens": 23501,
+      "total_generated_tokens": 50791,
+      "request_throughput": 0.18,
+      "output_token_throughput": 90.51,
+      "peak_output_token_throughput": 272.0,
+      "peak_concurrent_requests": 100.0,
+      "total_token_throughput": 132.38,
+      "mean_ttft": 261162.69,
+      "median_ttft": 292400.81,
+      "p99_ttft": 514943.93,
+      "mean_tpot": 152.01,
+      "median_tpot": 153.32,
+      "p99_tpot": 215.12,
+      "mean_itl": 152.7,
+      "median_itl": 78.38,
+      "p99_itl": 480.46,
+      "success": true,
+      "config_name": "uvm_baseline",
+      "config_display_name": "UVM Baseline",
+      "total_time": 597.1181435585022,
+      "bench_args": "--model Qwen/Qwen3-30B-A3B-FP8 --dataset-name sharegpt --num-prompts 100 --dataset-path datasets/ShareGPT_V3_unfiltered_cleaned_split.json --sharegpt-output-len 512 --seed 42 --request-rate 5",
+      "timestamp": "2026-02-16T23:39:53.610945",
+      "client_log": "results/logs/20260216_232936_uvm_baseline_client.log",
+      "server_log": "results/logs/20260216_232936_uvm_baseline_server.log"
+    }
+  }
+}
