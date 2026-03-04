@@ -158,6 +158,25 @@ uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 > Yusheng Zheng, Tong Yu, Yiwei Yang, Minghui Jiang, Xiangyu Gao, Jianchang Su, Yanpeng Hu, Wenan Mao, Wei Zhang, Dan Williams, Andi Quinn
 > [arXiv:2512.12615](https://arxiv.org/abs/2512.12615)
 
+## Roadmap
+
+### Kernel Driver Extensible Framework
+
+- **Cross-VA-block proactive prefetch**: eBPF workqueue-based prefetch that breaks the 2MB per-fault-page limit. Done, pending end-to-end testing. ~20% improvement on microbenchmarks.
+- **GPU kernel submission-level scheduling**: Uprobe + kfunc for preempting and prioritizing GPU compute kernels across processes. (WIP, see `docs/gpu_preempt_kfunc_plan.md`)
+- **CPU-GPU coordinated scheduling**: Combined sched_ext + GPU memory/scheduling policies (FPRS). Currently ~5% improvement; exploring AI-driven policy search. (WIP, see `docs/xcoord_plan.md`)
+
+### Device-Side Extensions
+
+- **Safety verification**: Evaluate how the BPF verifier can reject unsafe GPU extension programs. (WIP)
+- **NVBit + eBPF integration**: Combine GPU instruction-level instrumentation (NVBit) with eBPF host-side policies via [bpftime](https://github.com/eunomia-bpf/bpftime). POC completed, integration in progress.
+
+### Policy and Evaluation
+
+- **Combined policies**: Explore richer policy compositions (prefetch + eviction + scheduling + CPU coordination) once framework capabilities are expanded.
+- **Dynamism**: Fast policy injection and fast runtime via compiler techniques, enabling both rapid development iteration and low-overhead execution.
+- **Paper improvements**: Strengthen evaluation methodology, add new workloads, and refine the writing.
+
 ## Related
 
 - [bpftime](https://github.com/eunomia-bpf/bpftime) - GPU device-side eBPF support

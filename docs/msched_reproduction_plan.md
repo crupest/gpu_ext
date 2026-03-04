@@ -328,7 +328,7 @@ Adjacent-stride 统计不可区分 (t=0.31, p>>0.05)。
 
 2. **Eviction 策略在高 oversubscription (1.84x) 下到天花板**: 82% chunk thrashing 是容量决定的，Belady OPT ≈ 简单 T1 保护 ≈ 默认 LRU，差异仅 0.3 ms/tok。
 
-3. **Cross-block prefetch 在高 oversubscription 下无效**: prefetch value ≈ eviction cost (PCIe 零和)。
+3. **Cross-block prefetch 在高 oversubscription (1.84x) + 循环访问下无效/有害**: prefetch value ≈ eviction cost (PCIe 零和)。中等 oversub + 线性访问模式下可能有效（见 cross_block_prefetch_plan §15.4）。
 
 4. **PCIe DMA 是压倒性瓶颈** (59%): 428 MB/token 迁移量不可通过软件减少，需要双 CE pipeline (驱动修改) 或更大 VRAM。
 
@@ -516,8 +516,8 @@ Phase 4: 扩展验证
 | Stock UVM (threshold=51) | 141.6 | 49.9 | 02-25 | 默认 NVIDIA 行为 |
 | always_max (threshold=1) | 219.1 | 76.9 | 02-25 | BPF 或 module param |
 | always_max + cycle_moe | 221.3 | 88.8 | 02-26 | 10-run mean |
-| template_belady | 229.6 | 91.2 | 02-26 | always_max + Belady eviction |
+| template_belady | 225.0 | 88.2 | 02-26 | always_max + Belady eviction (§2.4 5-run) |
 | **Proactive layer 4MB** | 227.7 | 90.0 | 02-27 | ≈ baseline (PCIe bottleneck) |
 | **Proactive layer 8MB** | 228.2 | 90.9 | 02-27 | ≈ baseline (2 runs only) |
-| cross-block blind | — | -28% | 02-27 | 有害 (VRAM 位移) |
+| cross-block blind | — | -28.5% | 02-27 | 有害 (VRAM 位移) |
 | cross-block adj-stride | — | ≈ baseline | 02-27 | 中性 (10-run 无显著差异) |

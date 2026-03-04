@@ -4,7 +4,7 @@
 
 ### 1.1 当前 GPU 抢占架构
 
-目前系统中有两种 GPU TSG 抢占路径：
+目前系统中有三种 GPU TSG 抢占路径：
 
 **路径 A：Userspace ioctl 路径（`gpu_preempt_ctrl` 工具）**
 
@@ -51,7 +51,7 @@ nv-kernel.o 内部 TSG 创建
 
 | 路径 | 优点 | 缺点 |
 |------|------|------|
-| A: ioctl | 功能完整、已验证 | 延迟高(356us+)、需要 userspace 参与、无法自动化 |
+| A: ioctl | 功能完整（test_preempt_ioctl 已验证） | 延迟高(356us+)、需要 userspace 参与、无法自动化。注：`gpu_preempt_ctrl` 因依赖不存在的 tracepoints 从未加载过（见 §8.1） |
 | B: bpf_wq | 纯内核态 | 需要 kworker 调度延迟、当前未支持 preempt |
 | C: kfunc | 延迟最低 | 只能在 init 时设置、无运行时 preempt 能力 |
 
@@ -79,7 +79,7 @@ BPF kprobe 捕获目标进程 hClient/hTsg → 存入 BPF map
     → RM dispatch → GSP RPC → 抢占完成
 ```
 
-预期延迟：消除 userspace context switch（~50-100us），总延迟从 ~356us 降至 ~200-250us。
+预期延迟：消除 userspace context switch（~50-100us），总延迟从 ~356us 降至 ~200-250us。**实测修正**（见 §8.10）：kfunc 低延迟带 177us（2x 提升），但总平均 540us 因 GSP 双峰分布反而高于 ioctl。
 
 ## 2. 现有代码分析
 
@@ -116,7 +116,7 @@ UVM 侧已有 sleepable kfunc 的先例：
 bpf_gpu_migrate_range(va_space, addr, length)  // KF_SLEEPABLE
 ```
 
-此 kfunc 通过 `bpf_wq` 从 non-sleepable 的 eviction/prefetch hooks 间接调用，是当前唯一的 sleepable GPU kfunc。
+此 kfunc 通过 `bpf_wq` 从 non-sleepable 的 eviction/prefetch hooks 间接调用，是本文档实现前唯一的 sleepable GPU kfunc（本文档新增 `bpf_nv_gpu_preempt_tsg` 为第二个）。
 
 ### 2.3 RM 抢占实现路径
 
@@ -368,9 +368,9 @@ static int do_preempt_wq(void *map, int *key, void *val)
 
 | 文件 | 操作 | 内容 |
 |------|------|------|
-| `src/nvidia/src/kernel/gpu/osapi.c` | 修改 | 添加 `nv_gpu_sched_do_preempt()` + EXPORT_SYMBOL |
+| `src/nvidia/arch/nvalloc/unix/src/osapi.c` | 修改 | 添加 `nv_gpu_sched_do_preempt()` + EXPORT_SYMBOL |
 | `kernel-open/nvidia/nv-gpu-sched-hooks.c` | 修改 | 添加 `bpf_nv_gpu_preempt_tsg` kfunc 定义和注册 |
-| `src/nvidia/exports_link_command.txt` + `nv.h` | 修改 | 导出 `nv_gpu_sched_do_preempt` 符号 |
+| `src/nvidia/exports_link_command.txt` | 修改 | 导出 `nv_gpu_sched_do_preempt` 符号（无需修改 `nv.h`，用 extern 前向声明） |
 
 Handle 捕获由 BPF kprobe 完成（零内核修改，见 §8.3）。`nv-gpu-sched-hooks.h`、`kernel_channel_group*.c`、`escape.c` 均不需要修改。
 
@@ -515,7 +515,7 @@ hClient=0xc1d0004b hTsg=0x5c000038   engine=13    # COPY engine (应用)
 hClient=0xc1d0004b hTsg=0x5c000046   engine=14    # COPY engine (应用)
 ```
 
-**Engine types**: 1=GR (Graphics/Compute), 13=CE (Copy Engine), 14=CE (Copy Engine 2)
+**Engine types**: 1=GR (Graphics/Compute), 13/14=CE (Copy Engine)。注：§8.9 kfunc 测试中观察到 engine 13=NVJPEG, 14=OFA — engine type 到物理 engine 的映射取决于 GPU 型号和 driver 配置
 
 **Step 3: 运行 `test_preempt_ioctl` 测试各种控制命令**
 
@@ -626,13 +626,13 @@ RTX 5090 的 RM 不直接操作 GPU 硬件，而是通过 RPC 发送到 GSP firm
 
 1. **`src/.../osapi.c`**
    - 新增 `nv_gpu_sched_do_preempt()`
-   - 走 `NV_ENTER_RM_RUNTIME` + `threadStateInit` + `Nv04ControlWithSecInfo` + `RS_PRIV_LEVEL_KERNEL` 路径
+   - 走 `NV_ENTER_RM_RUNTIME` + `Nv04ControlWithSecInfo` + `RS_PRIV_LEVEL_KERNEL` 路径（不使用 threadState，见 §8.7 最终实现）
 
 2. **`kernel-open/nvidia/nv-gpu-sched-hooks.c`**
    - 新增 `bpf_nv_gpu_preempt_tsg()` (KF_SLEEPABLE kfunc)
 
-3. **`src/nvidia/exports_link_command.txt`** + **`nv.h`**
-   - 导出 `nv_gpu_sched_do_preempt` 符号
+3. **`src/nvidia/exports_link_command.txt`**
+   - 导出 `nv_gpu_sched_do_preempt` 符号（无需修改 `nv.h`，用 extern 前向声明）
 
 **应撤回的多余修改**（handle 捕获由 kprobe 完成，不需要内核改动）：
 
@@ -657,7 +657,7 @@ RTX 5090 的 RM 不直接操作 GPU 硬件，而是通过 RPC 发送到 GSP firm
 **设计**：单进程单二进制，集成 BPF kprobe（捕获 TSG handles）+ CUDA driver API（运行 GPU kernel）+ ioctl preempt（抢占测试），一条命令展示完整 preempt 效果。
 
 **文件**：
-- `extension/test_preempt_demo.bpf.c` — kprobe on `nv_gpu_sched_task_init`，raw memory offset 读取 hClient/hTsg
+- `extension/test_preempt_demo.bpf.c` — BPF 3-probe 策略（kprobe + kretprobe on ioctl 捕获 hClient/hTsg，见 §8.3）
 - `extension/test_preempt_demo.c` — BPF loader + CUDA driver API + ioctl + 三项测试
 - `extension/Makefile` — 新增 `CUDA_APPS` 链接规则（`-lcuda -lpthread`）
 
@@ -674,7 +674,7 @@ RTX 5090 的 RM 不直接操作 GPU 硬件，而是通过 RPC 发送到 GSP firm
 ```
 Phase 1 (无 preempt):  10 kernels, avg=260151 min=259008 max=270364 us
 Phase 2 (持续 preempt): 10 kernels, avg=739293 min=711454 max=745119 us
-Preempts issued: 43211 in 7.4s (5859 preempts/sec)
+Preempts issued: 43211 in 7.4s (5839 preempts/sec)
 
 *** kernel time +184.2% (260151 → 739293 us) ***
 → PREEMPT IS INTERRUPTING GPU EXECUTION
@@ -923,7 +923,7 @@ Phase 2 (持续 preempt B):
 |------|------|-----------|-----------|------|
 | **E** | 两等量 context | A=539ms | A=278ms | **-48.4%** |
 | **F** | 短 A + 长 B | A=7.1ms | A=3.0ms | **-57.6%** |
-| D (参考) | 单 context 连续 preempt | 260ms | 744ms | +185.8% (preempt 开销) |
+| D (参考) | 单 context 连续 preempt | 260ms | 739ms | +184.2% (preempt 开销) |
 
 **结论**：
 1. **TSG preempt = 有效的 kernel 级 preempt**：preempt TSG 在 kernel 运行时调用 = 打断该 kernel 执行
@@ -1182,7 +1182,7 @@ preempt throughput: 5504 preempts/sec
 
 1. **S1 的 LC 延迟高于预期** — `<<<512,256>>>` loop 模式下，BE 在 kernel 间有 gap（sync + relaunch），但 GPU 争抢仍然导致 5ms avg 延迟。这说明即使 GPU 有空闲 SM，TSG 级别的调度器也会造成延迟
 
-2. **S2 的 max=8302us** — 这是硬件 timeslice 的上界。当 BE persistent kernel 占满所有 SM，LC 必须等到 GPU 硬件 round-robin timeslice 轮转才能拿到 SM 时间。此延迟不可控
+2. **S2 的 max=8302us** — 这接近硬件 timeslice 周期。当 BE persistent kernel 占满所有 SM，LC 必须等到 GPU 硬件 round-robin timeslice 轮转才能拿到 SM 时间。S1 的更高 max=9542us 来自 kernel relaunch gap 叠加 timeslice 等待
 
 3. **S3 消除了尾延迟** — BPF preempt 强制中断 BE 的 TSG，使 LC 不再受硬件 timeslice 随机性影响：
    - max 从 8302us 降至 4899us（-41%）

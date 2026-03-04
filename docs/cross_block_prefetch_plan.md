@@ -12,7 +12,7 @@
 ### 为什么需要 Cross-block Prefetch
 
 在 MSched 复现实验中已确认：
-- BPF always_max prefetch + passive MRU eviction 达到 pp=228, tg=78.7 tok/s（+63% over baseline）
+- BPF always_max prefetch + passive MRU eviction 达到 pp=228, tg=78.7 tok/s（短序列 tg128 +74% over Phase 2 baseline；长序列 tg512 +63%）
 - 但 chunk_trace 显示 **82% chunk thrashing 未改变** — 因为 intra-block prefetch 只扩展当前 2MB VA block 内的预取范围
 - Eviction 优化天花板约 2-4% 额外提升（只改淘汰顺序，不改淘汰总量）
 - **真正突破需要 cross-VA-block proactive prefetch** — 提前迁移相邻 VA block 的数据
