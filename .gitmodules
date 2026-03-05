@@ -16,3 +16,7 @@
 [submodule "workloads/llama.cpp/llama.cpp"]
 	path = workloads/llama.cpp/llama.cpp
 	url = https://github.com/eunomia-bpf/llama.cpp
+[submodule "workloads/vllm/vllm"]
+	path = workloads/vllm/vllm
+	url = https://github.com/eunomia-bpf/vllm.git
+	branch = uvm

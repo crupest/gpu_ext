@@ -21,12 +21,12 @@ Each workload has independent version management:
 | `llama.cpp` | requests, tqdm, huggingface-hub, numpy, matplotlib, pandas, psutil | — |
 | `pytorch` | torch, psutil, numpy, matplotlib, torch-geometric | — |
 | `faiss` | numpy<2, matplotlib | faiss (from local submodule build: `uv pip install -e faiss/build/faiss/python/`) |
-| `vllm` | numpy, matplotlib | vllm (from local source: `uv pip install -e ~/workspace/vllm`) |
+| `vllm` | numpy, matplotlib | vllm (from local submodule: `uv pip install -e vllm/`) |
 
 **Rule: 凡是本地有 source 的包，一律用本地 source 安装（`uv pip install -e <local_path>`），不从 PyPI 拉。** Source-installed packages 不写在 `pyproject.toml` 的 `dependencies` 里 — 它们需要先从源码构建，再 `uv pip install -e <path>` 装进 workload 的 `.venv`。
 
 Known local sources:
-- vLLM: `~/workspace/vllm` (带 UVM 支持的 fork)
+- vLLM: `workloads/vllm/vllm/` (submodule, 带 UVM 支持的 fork)
 - FAISS: `workloads/faiss/faiss/` (submodule, 需先 cmake build)
 - llama.cpp: `workloads/llama.cpp/llama.cpp/` (submodule, 编译出 C++ binary，不是 Python 包)
 

@@ -397,7 +397,7 @@ sudo kill $POLICY_PID; wait $POLICY_PID 2>/dev/null || true
 
 **配置**: Qwen3-30B-A3B-FP8, `--max-num-seqs 16`, 100 ShareGPT requests
 
-**前置**: vLLM 从本地 source 安装 (`~/workspace/vllm`)，UVM allocator 已构建
+**前置**: vLLM 从 submodule 安装 (`workloads/vllm/vllm/`)，UVM allocator 已构建
 
 **运行步骤**：
 

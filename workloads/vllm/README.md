@@ -4,14 +4,18 @@ Benchmarks vLLM with different KV-cache memory strategies to evaluate gpu_ext's 
 
 ## Prerequisites
 
-### 1. Install vLLM from source
+### 1. Install vLLM from source (submodule)
 
-vLLM must be installed from the local source at `~/workspace/vllm` (contains UVM allocator support):
+vLLM is included as a git submodule at `workloads/vllm/vllm/` (UVM fork, pinned to commit `3ec7b051`):
 
 ```bash
+# Initialize submodule (if not already done)
+git submodule update --init workloads/vllm/vllm
+
+# Install into workload venv
 cd workloads/vllm
 uv venv
-uv pip install -e ~/workspace/vllm
+uv pip install -e vllm/
 ```
 
 ### 2. Build and install UVM allocator
@@ -19,9 +23,9 @@ uv pip install -e ~/workspace/vllm
 The UVM allocator (`uvm_allocator.abi3.so`) intercepts PyTorch's CUDA memory allocations and replaces them with `cudaMallocManaged`:
 
 ```bash
-cd ~/workspace/vllm/uvm_test
+cd workloads/vllm/vllm/uvm_test
 make uvm
-cp uvm_allocator.so ~/workspace/vllm/vllm/uvm_allocator.abi3.so
+cp uvm_allocator.so ../vllm/uvm_allocator.abi3.so
 ```
 
 ### 3. Download ShareGPT dataset
@@ -126,6 +130,7 @@ curl http://localhost:8000/v1/completions \
 
 ```
 vllm/
+├── vllm/                 # vLLM source (git submodule, UVM fork)
 ├── Makefile              # Quick bench target + dataset download
 ├── README.md             # This file
 ├── pyproject.toml        # Python dependencies (uv)

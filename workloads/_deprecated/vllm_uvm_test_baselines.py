@@ -27,7 +27,7 @@ from pathlib import Path
 
 # Directories (override via environment variables)
 VLLM_SERVER_DIR = os.environ.get(
-    "VLLM_SERVER_DIR", os.path.expanduser("~/workspace/vllm")
+    "VLLM_SERVER_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vllm", "vllm")
 )
 LMCACHE_SERVER_DIR = os.environ.get(
     "LMCACHE_SERVER_DIR", os.path.expanduser("~/workspace/gpu/LMCache")

@@ -199,9 +199,10 @@ cd workloads/llama.cpp/uvm && python visbasic.py   # produces llama_uvm_combined
 ```bash
 cd workloads/vllm
 
-# Create venv and install vLLM from local source (with UVM support)
+# Initialize submodule and install vLLM from local source (with UVM support)
+git submodule update --init workloads/vllm/vllm
 uv sync
-uv pip install -e ~/workspace/vllm
+uv pip install -e vllm/
 
 # Download dataset (if not present)
 make download-datasets
@@ -235,7 +236,7 @@ python scripts/run_trials.py --trials 10 \
   --results-dir vllm/results/exp2/cpu_offload/
 ```
 
-**Note**: `serve_bench.py` defaults to `~/workspace/vllm` for vLLM server. Override via `VLLM_SERVER_DIR` environment variable.
+**Note**: `serve_bench.py` defaults to `workloads/vllm/vllm/` (submodule) for vLLM server. Override via `VLLM_SERVER_DIR` environment variable.
 
 ### Expected Output
 
@@ -536,7 +537,7 @@ Scripts use relative paths by default. Override via environment variables when n
 
 | Variable | Used By | Default | Description |
 |----------|---------|---------|-------------|
-| `VLLM_SERVER_DIR` | `vllm/configs/serve_bench.py` | `~/workspace/vllm` | vLLM installation directory |
+| `VLLM_SERVER_DIR` | `vllm/configs/serve_bench.py` | `vllm/` (submodule) | vLLM installation directory |
 | `DATASET_PATH` | `vllm/configs/serve_bench.py` | `datasets/ShareGPT_V3_...json` | ShareGPT dataset path |
 | `MODEL_120B_CACHE` | `llama.cpp/Makefile` | `$HOME/.cache/llama.cpp/...` | GPT-OSS-120B model path |
 
@@ -551,7 +552,7 @@ All experiments must strictly follow the paper configurations. Each experiment h
 | Software | Version | Notes |
 |----------|---------|-------|
 | PyTorch | 2.10.0+cu128 | with custom UVM/GPU allocator |
-| vLLM | 0.11.0rc2 | local UVM fork (`~/workspace/vllm`) |
+| vLLM | 0.11.0rc2 | UVM fork submodule (`workloads/vllm/vllm/`) |
 | llama.cpp | build 7101 (commit 65b578b1) | eunomia-bpf/llama.cpp fork |
 | Faiss | 1.13.0 | eunomia-bpf/faiss fork |
 | CUDA | 12.8 | Driver 570.133.20 |
@@ -670,7 +671,7 @@ The following items are needed to fully reproduce all experiments but are not ye
 | GPT-OSS-120B model | llama.cpp (Exp 1) | ~59 GiB | `huggingface-cli download ggml-org/gpt-oss-120b-GGUF` |
 | Qwen3-30B-A3B-FP8 model | vLLM (Exp 2) | ~30 GB | Auto-downloaded by vLLM on first run |
 | SIFT1B dataset | Faiss (Exp 4) | ~60 GB | `bash faiss/download_sift.sh` |
-| vLLM (modified for UVM) | vLLM (Exp 2) | — | `uv pip install -e ~/workspace/vllm` (local UVM fork) |
+| vLLM (modified for UVM) | vLLM (Exp 2) | — | submodule at `workloads/vllm/vllm/`, install with `uv pip install -e vllm/` |
 | LMCache | vLLM baseline (Exp 2) | — | Clone from github.com/LMCache/LMCache |
 | HotSpot/GEMM/K-Means | Multi-tenant microbench (Exp 7) | small | From Rodinia/PolyBench/UVMBench |
 | cuda-samples vector-add | Device microbench (Exp 8) | small | From NVIDIA cuda-samples |

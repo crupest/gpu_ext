@@ -9,6 +9,6 @@ dependencies = [
 ]
 
 [tool.uv]
-# vLLM is installed from local source (~/workspace/vllm) with UVM support.
+# vLLM is installed from local submodule (workloads/vllm/vllm/) with UVM support.
 # After building vllm from source, install with:
-#   uv pip install -e ~/workspace/vllm
+#   cd workloads/vllm && uv pip install -e vllm/
