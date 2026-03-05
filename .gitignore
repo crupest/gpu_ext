@@ -62,5 +62,8 @@ docs/presentation/*/dist/
 workloads/llama.cpp/scripts/
 workloads/faiss/scripts/
 
+# Large dataset files (>100MB, download separately)
+workloads/llama.cpp/datasets/sharegpt_vicuna.json
+
 # FAISS submodule (large, cloned separately)
 workloads/faiss/faiss
