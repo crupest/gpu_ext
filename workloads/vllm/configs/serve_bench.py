@@ -22,7 +22,7 @@ WORKLOADS_DIR = WORKLOAD_DIR.parent
 sys.path.insert(0, str(WORKLOADS_DIR / "scripts"))
 from common import cleanup_gpu, wait_for_server, stop_server, parse_vllm_bench_output
 
-VLLM_SERVER_DIR = os.environ.get("VLLM_SERVER_DIR", str(Path.home() / "workspace/vllm"))
+VLLM_SERVER_DIR = os.environ.get("VLLM_SERVER_DIR", str(WORKLOAD_DIR / "vllm"))
 DATASET_PATH = os.environ.get(
     "DATASET_PATH",
     str(WORKLOAD_DIR / "datasets" / "ShareGPT_V3_unfiltered_cleaned_split.json"),
@@ -45,7 +45,7 @@ SERVER_STARTUP_TIMEOUT = 600
 SERVER_CHECK_INTERVAL = 5
 
 
-def run_serve_bench(mode: str, prompts: int) -> dict:
+def run_serve_bench(mode: str, prompts: int, port: int = 8000) -> dict:
     """Start server, run benchmark, stop server, return result."""
     config = MODE_CONFIGS[mode]
 
@@ -53,11 +53,12 @@ def run_serve_bench(mode: str, prompts: int) -> dict:
     env = os.environ.copy()
     env.update(config["env"])
 
-    print(f"Starting vLLM server (mode={mode})...", file=sys.stderr)
+    server_cmd = config["server_cmd"] + f" --port {port}"
+    print(f"Starting vLLM server (mode={mode}, port={port})...", file=sys.stderr)
     server_proc = subprocess.Popen(
-        config["server_cmd"],
+        server_cmd,
         shell=True,
-        cwd=VLLM_SERVER_DIR,
+        cwd=str(WORKLOAD_DIR),
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -65,7 +66,7 @@ def run_serve_bench(mode: str, prompts: int) -> dict:
     )
 
     try:
-        if not wait_for_server(timeout=SERVER_STARTUP_TIMEOUT,
+        if not wait_for_server(port=port, timeout=SERVER_STARTUP_TIMEOUT,
                               check_interval=SERVER_CHECK_INTERVAL, process=server_proc):
             print("ERROR: Server failed to start", file=sys.stderr)
             stop_server(server_proc)
@@ -79,7 +80,9 @@ def run_serve_bench(mode: str, prompts: int) -> dict:
             f"--model {MODEL} "
             f"--dataset-name sharegpt "
             f"--dataset-path {DATASET_PATH} "
-            f"--num-prompts {prompts}"
+            f"--num-prompts {prompts} "
+            f"--sharegpt-output-len 512 --seed 42 --request-rate 5 "
+            f"--port {port}"
         )
 
         start = time.time()
@@ -124,6 +127,7 @@ def main():
                         help="Server mode")
     parser.add_argument("--prompts", type=int, default=100, help="Number of prompts")
     parser.add_argument("--output", "-o", help="Output JSON path (default: stdout)")
+    parser.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
     parser.add_argument("--no-cleanup", action="store_true", help="Skip GPU cleanup")
     args = parser.parse_args()
 
@@ -134,7 +138,7 @@ def main():
     if not args.no_cleanup:
         cleanup_gpu()
 
-    result = run_serve_bench(args.mode, args.prompts)
+    result = run_serve_bench(args.mode, args.prompts, port=args.port)
 
     output_json = json.dumps(result, indent=2)
     if args.output:
