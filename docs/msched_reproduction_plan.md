@@ -328,6 +328,7 @@ Adjacent-stride 统计不可区分 (t=0.31, p>>0.05)。
 
 2. **Eviction 策略在高 oversubscription (1.84x) 下到天花板**: 82% chunk thrashing 是容量决定的，Belady OPT ≈ 简单 T1 保护 ≈ 默认 LRU，差异仅 0.3 ms/tok。
 
+
 3. **Cross-block prefetch 在高 oversubscription (1.84x) + 循环访问下无效/有害**: prefetch value ≈ eviction cost (PCIe 零和)。中等 oversub + 线性访问模式下可能有效（见 cross_block_prefetch_plan §15.4）。
 
 4. **PCIe DMA 是压倒性瓶颈** (59%): 428 MB/token 迁移量不可通过软件减少，需要双 CE pipeline (驱动修改) 或更大 VRAM。

@@ -162,20 +162,23 @@ uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 
 ### Kernel Driver Extensible Framework
 
-- **Cross-VA-block proactive prefetch**: eBPF workqueue-based prefetch that breaks the 2MB per-fault-page limit. Done, pending end-to-end testing. ~20% improvement on microbenchmarks.
-- **GPU kernel submission-level scheduling**: Uprobe + kfunc for preempting and prioritizing GPU compute kernels across processes. (WIP, see `docs/gpu_preempt_kfunc_plan.md`)
-- **CPU-GPU coordinated scheduling**: Combined sched_ext + GPU memory/scheduling policies (FPRS). Currently ~5% improvement; exploring AI-driven policy search. (WIP, see `docs/xcoord_plan.md`)
+- [x] **Cross-VA-block proactive prefetch**: eBPF workqueue-based prefetch that breaks the 2MB per-fault-page limit. ~20% improvement on microbenchmarks. Pending end-to-end testing on real workloads.
+- [x] **GPU kernel submission-level scheduling**: `bpf_nv_gpu_preempt_tsg` kfunc for cross-process GPU TSG preemption. Two trigger paths verified: bpf_wq from struct_ops hooks, and sleepable uprobe on `cuLaunchKernel` (avg 312us, no bpf_wq needed). (see `docs/gpu_preempt_kfunc_plan.md`)
+- [x] **CPU-GPU coordinated scheduling**: Combined sched_ext + GPU memory/scheduling policies (FPRS). ~5% improvement on multi-tenant serving. (see `docs/xcoord_plan.md`)
+- [ ] **Better coordinated scheduling policy**: Exploring AI-driven policy search for improved CPU-GPU coordination.
 
 ### Device-Side Extensions
 
-- **Safety verification**: Evaluate how the BPF verifier can reject unsafe GPU extension programs. (WIP)
-- **NVBit + eBPF integration**: Combine GPU instruction-level instrumentation (NVBit) with eBPF host-side policies via [bpftime](https://github.com/eunomia-bpf/bpftime). POC completed, integration in progress.
+- [ ] **Safety verification**: Evaluate how the BPF verifier can reject unsafe GPU extension programs. Design exists in paper; no implementation yet.
+- [x] **NVBit + eBPF integration (POC)**: Proof-of-concept completed via [bpftime](https://github.com/eunomia-bpf/bpftime).
+- [ ] **NVBit + eBPF integration (production)**: Full integration with bpftime runtime. In progress.
 
 ### Policy and Evaluation
 
-- **Combined policies**: Explore richer policy compositions (prefetch + eviction + scheduling + CPU coordination) once framework capabilities are expanded.
-- **Dynamism**: Fast policy injection and fast runtime via compiler techniques, enabling both rapid development iteration and low-overhead execution.
-- **Paper improvements**: Strengthen evaluation methodology, add new workloads, and refine the writing.
+- [x] **Combined host-side policies**: Multiple compositions implemented and benchmarked (always_max + cycle_moe, always_max + xCoord, FPRS coord v2).
+- [ ] **More complex combined policies**: Explore richer compositions (prefetch + eviction + scheduling + CPU coordination) once framework capabilities are expanded.
+- [ ] **Dynamism**: Fast policy injection and fast runtime via compiler techniques, enabling both rapid development iteration and low-overhead execution.
+- [ ] **Paper improvements**: Strengthen evaluation methodology, add new workloads, and refine the writing.
 
 ## Related
 
