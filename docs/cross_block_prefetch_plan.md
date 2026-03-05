@@ -659,23 +659,40 @@ sudo kill $POLICY_PID; wait $POLICY_PID 2>/dev/null || true
 
 **硬件**: RTX 5090 32GB, UVM peak 45.11 GB
 
-| Config | 策略 | avg epoch (s) | vs baseline |
-|--------|------|:---:|:---:|
-| A1 (baseline) | no BPF, UVM default | **140.25** | — |
-| A2 | always_max + cycle_moe | **140.22** | ±0% (无效) |
-| A3 | cross_block_v2 mode 0 (direction-aware) | **139.60** | -0.46% (无显著差异) |
+#### 7.1.0 ⚠️ 关键 Bug 修复：uvm_allocator.c 导致 2x 退化
 
-A1 epoch times: 140.45, 140.47, 140.00, 140.09, 140.24 (σ<0.5s)
-A2 epoch times: 140.82, 140.36, 140.86, 139.95, 139.11 (σ<0.7s)
-A3 epoch times: 139.23, 139.59, 140.70, 139.10, 139.37 (σ<0.6s)
+**原始 XB3 数据（2026-03-04, A1-A3）均无效** — 因为 `uvm_allocator.c` 在 2026-02-17 被错误修改：
 
-**A3 cross-block stats**: kprobe=2.99M, wq_scheduled=67K, migrate_success=58.2K (99.4%), direction_skip=2.4K
+- **V1 (Dec 2025, 正确版本)**: 纯 `cudaMallocManaged`，无 advise，无 prefetch
+- **V3 (Feb 17 引入的 bug)**: 加了 `cudaMemAdviseSetPreferredLocation=CPU`
 
-**GNN 结论**: intra-block 和 cross-block prefetch 均对 GNN 无效（三个 config 差异 <1%）。
-- 可能原因 1: GNN chunked propagation (chunk_size=2M) 每 chunk 的 fault 触发 default UVM prefetch 已足够覆盖
-- 可能原因 2: GNN 的瓶颈不在 page fault stall，而在 GPU compute 或 memory bandwidth
-- 可能原因 3: 45 GB 分配中大部分是 adjacency matrix (sparse tensor)，访问模式是 gather/scatter 而非 sequential scan
-- **需要 profiling (nsys) 确认 page fault 是否是实际瓶颈**
+`SetPreferredLocation=CPU` 导致被 evict 的页面**强制回到 CPU**，双倍 migration 流量：
+- V1 baseline: **70.15s** (匹配 Dec 2025 的 70.06s)
+- V3 baseline: **140.25s** (2x 退化!)
+- V3 + BPF always_max: **140.22s** (BPF 也无法补偿 — advise 优先级高于 prefetch)
+
+**修复**: 已回退到 V1，commit `975d39e`，文件头加 `DO NOT MODIFY` 注释。
+
+#### 7.1.1 修复后的 GNN 结果（V1 allocator, 2026-03-04）
+
+| Config | 策略 | avg epoch (s) | vs baseline | vs Dec 2025 |
+|--------|------|:---:|:---:|:---:|
+| A1 (baseline) | no BPF, UVM default | **70.15** | — | 70.06s ✓ |
+| A2 | always_max (intra-block prefetch) | **26.99** | -61.5% (**2.60x**) | 26.47s ✓ |
+| A3 | cross_block_v2 mode 0 (direction-aware) | **21.32** | -69.6% (**3.29x**) | — |
+| A4 | cross_block_v2 mode 3 (adjacent-stride) | **24.32** | -65.3% (**2.89x**) | — |
+
+A1 epoch times: 70.08, 70.13, 70.23 (σ<0.1s)
+A2 epoch times: 27.03, 26.98, 26.95 (σ<0.04s)
+A3 epoch times: 21.31, 21.33, 21.31 (σ<0.01s)
+A4 epoch times: 24.27, 24.31, 24.36 (σ<0.05s)
+
+**结论**:
+1. **always_max**: 2.60x 加速，完全复现 paper 数据 (Dec 2025: 2.65x)
+2. **cross-block direction-aware**: 在 always_max 基础上再提升 **21%** (27.0→21.3s)，总计 **3.29x**！
+3. **cross-block adjacent-stride**: 中间结果 (24.3s, 2.89x)，比 direction-aware 保守但仍有显著提升
+4. GNN epoch scan 是 strict sequential forward → direction-aware XB 最为适合
+5. 之前 XB3 实验全部无效是因为 `cudaMemAdviseSetPreferredLocation=CPU` 的 allocator bug (已修复)
 
 ### 7.2 Exp-XB4: FAISS SIFT100M (1.5x oversub)
 
