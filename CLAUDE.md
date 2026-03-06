@@ -62,6 +62,12 @@ Each workload directory (`workloads/<name>/`) must contain:
 
 Always run `python workloads/cleanup_gpu.py` before benchmarks to kill stale GPU processes.
 
+### Experiment Execution
+
+- **Experiments MUST run serially, NEVER in parallel.** BPF struct_ops is a global singleton — only one can be loaded at a time. The GPU is also a shared resource. Two concurrent experiments will corrupt each other's results or crash.
+- When using subagents: multiple subagents may write code and build in parallel, but only ONE subagent may run a GPU/BPF experiment at any given time. The next experiment starts only after the previous one finishes and cleans up.
+- Always kill BPF processes and run `cleanup_struct_ops_tool` between experiment configs.
+
 ### Git
 
 - Large files (models, datasets, `.venv/`, build artifacts) are gitignored.

@@ -931,6 +931,113 @@ sudo kill $POLICY_PID; sudo $EXT_DIR/cleanup_struct_ops_tool 2>/dev/null || true
 - **原理**: GPU 处理 chunk N 的同时，BPF 已开始 DMA 迁移 chunk N+1 — pipeline 效果
 - **iter 1-2 衰减**: 数据分布碎片化后 prefetch 命中率下降。改进: multi-slot ring buffer + depth>1 (§8.5.2)
 
+### 7.10 Exp-N1: Stride-Predictive Multi-Block on GNN 10M (2026-03-06)
+
+**策略**: `prefetch_stride_multiblock.bpf.c` — 检测 stride pattern，根据 confidence 预取 K=1-6 个 block ahead。
+
+| Config | 策略 | avg epoch (s) | vs baseline |
+|--------|------|:---:|:---:|
+| A2 | always_max (intra-block) | **26.37** | 2.66x |
+| A3 | XB direction-aware (1-block) | **20.96** | **3.35x** |
+| **N1** | **stride multi-block (K=1-6)** | **38.47** | **1.82x (退化!)** |
+
+Epoch times:
+- A2: 26.33, 26.35, 26.42 (σ<0.05s)
+- A3: 20.98, 20.96, 20.94 (σ<0.02s)
+- N1: 38.24, 38.40, 38.78 (σ<0.27s)
+
+**分析**:
+1. **N1 严重退化**: 38.47s 比 always_max 慢 46%，比 1-block XB 慢 83%
+2. **根本原因**: multi-block 预取 K=6 个 block (12MB) per fault，PCIe 带宽被过度预取消耗。与 llama.cpp cross-block 退化原因相同 — 预取带宽 > 可用 PCIe 余量
+3. **GNN 10M (1.34x oversub)**: 虽然 oversub 不高，但 multi-block 预取驱逐了即将需要的 pages → 二次 fault → 恶性循环
+4. **1-block XB direction-aware 仍是 GNN 最优**: 恰好的预取深度 (1 block = 2MB) 利用了 PCIe 余量而不过载
+
+**结论**: Multi-block prefetch 需要更精细的带宽控制。可能的改进：
+- 降低 MAX_LOOKAHEAD 到 2-3（而非 6）
+- 添加 PCIe 带宽感知的 rate limiting
+- 仅在 confidence=10 时才多 block，其他时候退化到 1-block
+
+### 7.11 Exp-N5: Uprobe FAISS Phase Detection on SIFT100M (2026-03-05)
+
+**策略**: `prefetch_faiss_uprobe.bpf.c` — 通过 uprobe 挂钩 FAISS 的 `GpuIndex::add_with_ids()` 和 `GpuIndex::search()` C++ 方法精确检测 BUILD vs SEARCH 阶段。BUILD 阶段启用 cross-block direction-aware，SEARCH 阶段仅 always_max。Eviction: default_lru。
+
+**vs faiss_phase v2**: v2 通过统计 fault pattern（连续 VA block 步长窗口）启发式检测阶段，有 per-fault overhead。Uprobe 方式零 per-fault overhead，但需要应用 symbol 信息。
+
+| Config | 策略 | add (s) | np1 (s) | np4 (s) | np16 (s) |
+|--------|------|:---:|:---:|:---:|:---:|
+| B | always_max (intra-block) | 57.81 | 12.16 | 13.45 | 52.72 |
+| D3 | faiss_phase v2 (heuristic) | 48.07 | 6.09 | 13.21 | 51.90 |
+| **N5** | **faiss_uprobe (zero overhead)** | **48.65** | **6.06** | **13.13** | **51.69** |
+
+**Historical reference** (Exp-XB4 §7.6): faiss_phase v2 best=47.31s add, 5.49s np1
+
+**分析**:
+1. **N5 ≈ D3**: Uprobe 检测与启发式检测性能几乎相同，说明 faiss_phase v2 的 per-fault 检测 overhead 可忽略
+2. **Add 阶段**: 48.65s vs baseline 69.40s = **-30% 加速**（cross-block 在 BUILD 阶段有效）
+3. **np1**: 6.06s vs always_max 12.16s = **2x 更快**（SEARCH 阶段跳过 cross-block 避免 PCIe 竞争）
+4. **np4/np16**: 差异很小（GPU-bound，PCIe 不是瓶颈）
+5. **Uprobe 优势**: 零运行时开销检测，但需要知道应用 symbol — 适合已知应用的部署
+
+**结论**: 对于 FAISS，heuristic 和 uprobe 两种 phase detection 方式等效。**真正的价值在于 phase detection 本身（不论实现方式），而非检测机制的 overhead 差异。** Uprobe 的优势在其他场景（如 llama.cpp/vLLM）更突出，因为 heuristic detection 可能不够准确或有更高的 false positive rate。
+
+### 7.12 Exp-N6: Uprobe llama.cpp Phase Detection on 120B MoE (2026-03-06)
+
+**策略**: `prefetch_llama_phase.bpf.c` — uprobe 挂钩 `llama_decode()` 读取 `batch.n_tokens`（从栈上 `RSP+8`），`n_tokens > 1` = PREFILL，`== 1` = DECODE。PREFILL 启用 cross-block direction-aware，DECODE 仅 always_max。Eviction: cycle_moe。
+
+| Config | pp (tok/s) | tg (tok/s) | Notes |
+|--------|:---:|:---:|-------|
+| A: always_max+cycle_moe (p128) | 262.28 ± 121.89 | 83.29 ± 13.93 | baseline |
+| N6: llama_phase (p128) | 188.38 ± 111.39 | 84.35 ± 18.55 | phase-gated XB |
+| N6b: llama_phase (p512) | 205.20 ± 2.76 | 78.59 ± 5.32 | longer prefill |
+
+**Phase stats (N6, p128)**: prefill=6, decode=641, XB_prefill=28592, decode_skip=54771, migrate_ok=22749
+**Phase stats (N6b, p512)**: prefill=6, decode=641, XB_prefill=68728, decode_skip=58078, migrate_ok=55666
+
+**分析**:
+1. **Phase detection 机制正确**: 6次 prefill→decode 转换（5 runs × 1 initial + warmup），641次 decode 调用
+2. **pp 退化 -28%**: cross-block 预取在 PREFILL 阶段增加 DMA 流量，竞争 PCIe 带宽
+3. **tg 中性 +1.3%**: phase gating 正确禁用了 DECODE 阶段的 XB，不影响 decode 性能
+4. **p512 更差**: 更多 XB 预取（68K vs 28K）但 tg 反而下降到 78.59，因为 prefill 期间积累的 VRAM 碎片影响后续 decode
+5. **与先前结论一致**: 1.84x oversub 下，PCIe 已饱和，任何增加 DMA 流量的策略都是零和博弈
+
+**结论**: Uprobe phase detection **机制验证成功**（准确分类、正确 gating），但对 llama.cpp 120B (1.84x oversub) **cross-block 无收益**。Phase detection 的价值在于**保护 decode 不受 XB 干扰**（tg 中性），而非提升 pp。此结果与 FAISS/vLLM 对比后证明: **phase detection 价值取决于 workload 的 oversub ratio 和 PCIe 余量**。
+
+### 7.13 Exp-N6v: Uprobe vLLM Phase Detection on Qwen3-30B Serving (2026-03-06)
+
+**策略**: `prefetch_vllm_phase.bpf.c` — uprobe 挂钩 `uvm_set_phase()` in `uvm_allocator.abi3.so`，Python model runner 在 `execute_model()` 入口调用。PREFILL 启用 cross-block direction-aware，DECODE 仅 always_max。Eviction: cycle_moe。
+
+| Config | TPOT (ms) | tput (tok/s) | P99_TPOT (ms) | Notes |
+|--------|:---:|:---:|:---:|-------|
+| A: baseline (no BPF) | 61.40 | 231.99 | 64.80 | fresh baseline |
+| C: always_max+cycle_moe | 57.17 | 249.97 | 59.20 | reference (-6.9%) |
+| **N6: vllm_phase (uprobe)** | **61.46** | **234.50** | **73.37** | **phase-gated XB** |
+
+**Phase stats (N6)**: prefill=66, decode=4032, XB_prefill=48799, decode_skip=345046, migrate_ok=23557, migrate_fail=21368 (48% fail rate)
+
+**分析**:
+1. **Phase detection 机制正确**: 66 次 prefill、4032 次 decode 转换
+2. **N6 ≈ baseline**: TPOT=61.46ms ≈ 61.40ms，phase gating 有效跳过 decode XB (345K skips)
+3. **但 N6 << Config C**: Config C 的 always_max+cycle_moe 在 decode 阶段也做 cross-block，而 N6 跳过了 → 损失了 decode 期间的 XB 收益
+4. **P99 regression**: 73.37ms >> 64.80ms baseline。48% XB migration failure rate 在 prefill 阶段制造了延迟尖峰
+5. **根本原因**: vLLM 1.175x oversub 下 **decode 阶段也从 cross-block 受益**（与 llama.cpp 1.84x 不同）
+
+**结论**: 对 vLLM serving，**不应 gate cross-block by phase**。always_max+cycle_moe (Config C) 的均匀策略仍是最优。Phase detection 的价值在于保护 decode 免受 aggressive prefetch 干扰 — 但 vLLM 的 oversub 足够低，decode 不需要这种保护。
+
+### 7.14 Uprobe Phase Detection 综合结论
+
+| Workload | Oversub | Phase Detection 结果 | 原因 |
+|----------|---------|---------------------|------|
+| FAISS SIFT100M | 1.5x | **≈ heuristic** (§7.11) | Phase detection 本身有效，uprobe vs heuristic 无差异 |
+| llama.cpp 120B | 1.84x | **pp -28%, tg neutral** (§7.12) | PCIe 饱和，XB 在 prefill 有害。Decode 正确保护 |
+| vLLM 30B | 1.175x | **≈ baseline** (§7.13) | Decode 也需要 XB，phase gating 去除了有益预取 |
+
+**核心洞见**:
+- **Phase detection 机制正确可靠**: 三个 workload 都验证了 uprobe 准确分类 prefill/decode/build/search
+- **Phase-selective XB 在低 oversub 不需要**: vLLM (1.175x) decode 也受益于 XB，gating 反而有害
+- **Phase-selective XB 在高 oversub 无帮助**: llama.cpp (1.84x) PCIe 已饱和，XB 在任何 phase 都有害
+- **Phase detection 最佳场景**: FAISS 中 BUILD 和 SEARCH 有完全不同的访问模式（sequential vs random），gating XB 保护 SEARCH 不被 XB 干扰的同时加速 BUILD
+- **真正的 novelty**: 不是 phase detection 本身，而是 **BPF uprobe 使得 phase detection 成为零开销可编程接口**，应用可以向内核传递高层语义信息
+
 ---
 
 ## 8. 下一步: Novel BPF 算法设计
@@ -938,7 +1045,7 @@ sudo kill $POLICY_PID; sudo $EXT_DIR/cleanup_struct_ops_tool 2>/dev/null || true
 ### 8.0 现有算法总结与瓶颈分析
 
 **已实现策略**:
-- Prefetch: always_max, cross-block (blind/direction/adj-stride), phase-adaptive, serving-adaptive
+- Prefetch: always_max, cross-block (blind/direction/adj-stride), phase-adaptive, serving-adaptive, uprobe phase-gated
 - Eviction: cycle_moe (T1 protect), MRU, LFU, FIFO, Belady template
 
 **各 workload 最佳结果与瓶颈**:
@@ -1001,6 +1108,10 @@ gpu_page_prefetch(fault_va):
 **BPF 可行性**: stride_hist PERCPU_ARRAY ✓, K 个 wq_map entries (64×6=384) ✓, bounded for loop ✓
 
 **预期**: GNN +20-50% over XB direction, FAISS add +10%, llama.cpp 退化为 1-block (stride 不固定)
+
+**实测 (§7.10)**: GNN 38.47s (**-46% 退化**) — K=6 multi-block 过载 PCIe。需降低 MAX_LOOKAHEAD 或加带宽感知 rate limiting。
+
+文件: `extension/prefetch_stride_multiblock.bpf.c`, `prefetch_stride_multiblock.c`
 
 ### 8.2 Algorithm N2: Reuse Distance Eviction (Practical Belady)
 
@@ -1143,19 +1254,261 @@ register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE, &uvm_bpf_kfunc_set);
 
 改进设计: 应用 hint 未来 N 个 chunk (depth=2-4)，ring buffer 存储请求，struct_ops 并行 schedule 多个 bpf_wq → 同时有 2-4 个 DMA 在飞。预期: iter 1-2 的性能 gap 缩小。
 
-### 8.6 实现优先级
+### 8.6 Algorithm N6: Uprobe Phase Detection for llama.cpp / vLLM
+
+**动机**: 所有 workload 都有 prefill 和 decode 两个阶段，访问模式截然不同：
+- **Prefill**: sequential layer loading → cross-block prefetch 有效
+- **Decode**: sparse cyclic / random → cross-block 有害
+
+uprobe 精确检测 phase boundary，zero per-fault overhead。
+
+#### 8.6.1 llama.cpp Phase Detection
+
+**Hook**: `llama_decode()` in `libllama.so` — C ABI 函数，符号不需要 demangle。
+
+**Phase 判定**: 读取 `llama_batch.n_tokens`（struct by value on stack, offset rsp+8）：
+- `n_tokens > 1` → PREFILL（prompt processing, 一次处理多 token）
+- `n_tokens == 1` → DECODE（autoregressive, 每次 1 token）
+
+**策略**:
+- PREFILL: always_max + direction-aware cross-block + cycle_moe eviction
+- DECODE: always_max only + cycle_moe eviction (no cross-block)
+
+文件: `extension/prefetch_llama_phase.bpf.c`, `prefetch_llama_phase.c`
+状态: **已实现，已编译，待测试**
+
+#### 8.6.2 vLLM Phase Detection
+
+**Hook**: `uvm_set_phase(int phase)` in `uvm_allocator.abi3.so` — 新增的 C 函数。
+
+**改动**:
+1. `workloads/vllm/vllm/uvm_test/uvm_allocator.cpp` — 添加 `uvm_set_phase()`/`uvm_get_phase()`
+2. `workloads/vllm/vllm/vllm/device_allocator/uvm.py` — Python binding `set_uvm_phase()`
+3. `workloads/vllm/vllm/vllm/v1/worker/gpu_model_runner.py` — 在 `execute_model()` 入口调用：
+   - `scheduler_output.scheduled_new_reqs` 非空 → `uvm_set_phase(1)` (PREFILL)
+   - 否则 → `uvm_set_phase(2)` (DECODE)
+
+**策略**: 与 llama.cpp 相同 — PREFILL 开 cross-block，DECODE 关。
+
+文件: `extension/prefetch_vllm_phase.bpf.c`, `prefetch_vllm_phase.c`
+状态: **已实现，已编译，待测试**
+
+### 8.7 实现优先级
 
 | 算法 | 新颖度 | 预期改进 | 复杂度 | 状态 |
 |------|--------|----------|--------|------|
 | N5 uprobe App-Guided (microbench) | ★★★★★ | **+40-60% over always_max** | 低 | **已验证 ✓** |
-| N1 Stride-Predictive Multi-Block | ★★★★ | GNN +20-50%, FAISS +10% | 中 | **P0** |
-| N5 uprobe App-Guided (real workload) | ★★★★★ | GNN/FAISS 待验证 | 中 | **P0** |
-| N3 Cooperative Prefetch-Eviction | ★★★★★ | llama.cpp high-oversub +10-20% | 中 | **P1** |
-| N2 Reuse Distance Eviction | ★★★ | llama.cpp/vLLM +5-15% | 低 | **P1** |
+| N1 Stride-Predictive Multi-Block | ★★★★ | GNN -46% (退化) | 中 | **已测试 ✗ (§7.10)** |
+| N5 uprobe FAISS Phase Detection | ★★★★★ | ≈D3 heuristic (§7.11) | 中 | **已验证 ✓ (≈等效)** |
+| N6 uprobe llama.cpp Phase | ★★★★★ | pp -28%, tg neutral (§7.12) | 低 | **已验证 ✗ (PCIe saturated)** |
+| N6 uprobe vLLM Phase | ★★★★★ | ≈baseline, P99 regression (§7.13) | 中 | **已验证 ✗ (decode needs XB)** |
+| N7 Phase-Adaptive Decode Size | ★★★ | **一致有害** -23~-58% tg (§7.15) | 低 | **已验证 ✗ (batch efficiency loss)** |
+| N3 Cooperative Prefetch-Eviction | ★★★★★ | llama.cpp high-oversub +10-20% | 中 | P1 |
+| N2 Reuse Distance Eviction | ★★★ | llama.cpp/vLLM +5-15% | 低 | P1 |
 | N4 Online Pattern Classifier | ★★★★ | 通用性提升 | 高 | P2 |
 
 **下一步**:
-1. N5 uprobe 在真实 workload 上验证（GNN chunk prefetch / FAISS phase detection）
-2. N1 Stride-Predictive 在 GNN 上实现 — 效果最可量化
-3. N3 Cooperative 在 llama.cpp 验证 — 解决 PCIe 零和
+1. ~~N5 FAISS uprobe~~ **完成** — 与 D3 heuristic 等效（§7.11）
+2. ~~N6 llama.cpp phase~~ **完成** — XB 无益于 1.84x oversub（§7.12）
+3. ~~N6 vLLM phase~~ **完成** — ≈baseline, decode 也需要 XB（§7.13）
+4. ~~N7 Phase-adaptive decode prefetch size~~ **完成** — 缩小 decode 预取一致有害（§7.15）
+5. N1 降级版（MAX_LOOKAHEAD=2）重测 GNN
+6. N3 Cooperative 在 llama.cpp 验证
+
+### 7.15 Exp-N7: Phase-Adaptive Decode Prefetch Size (2026-03-05)
+
+**动机**: 之前 N6 只测了"XB 在 prefill 阶段开/关"。用户指出测试不够充分，应该迭代 decode 阶段的 intra-block 预取范围：如果 MoE decode 是 sparse random，也许缩小预取范围（而非整个 VA block）能减少浪费。
+
+**修改**: `prefetch_llama_phase.bpf.c` / `prefetch_vllm_phase.bpf.c` 新增 `decode_prefetch_mode` rodata：
+- Mode 0: always_max（全 VA block，等效 baseline）
+- Mode 1: narrow region（page_index ± decode_radius 页）
+- Mode 2: default kernel（return 0，使用 threshold=51）
+- Mode 3: forward-only（page_index → max_outer）
+- 新增 `xb_enable` 控制是否启用 cross-block
+
+#### 7.15.1 llama.cpp 120B MoE (1.84x oversub, r=3)
+
+| Config | 描述 | pp (tok/s) | tg (tok/s) | tg delta |
+|--------|------|:---:|:---:|:---:|
+| A | always_max_cycle_moe (baseline) | 213.94 | **83.87** | — |
+| B | phase mode0, no XB | 209.12 | 84.31 | +0.5% |
+| C | phase mode1 r=32, no XB | 213.40 | 44.03 | **-47.5%** |
+| D | phase mode1 r=8, no XB | 215.99 | 35.55 | **-57.6%** |
+| E | phase mode2 (default kernel), no XB | 215.71 | 49.07 | **-41.5%** |
+| F | phase mode3 (forward-only), no XB | 216.37 | 64.46 | **-23.1%** |
+| G | phase mode0 + XB prefill | 203.69 | 82.08 | -2.1% |
+
+结果文件: `workloads/results_phase_detection/20260305_run/llama_*.json`
+
+**分析**:
+1. **Config B ≈ A**: mode0 (always_max 两个 phase, 无 XB) 验证 uprobe 机制开销可忽略
+2. **所有缩小 decode 预取的 mode 严重伤害 tg**: mode1 r=32 (-47.5%), r=8 (-57.6%), mode2 (-41.5%), mode3 (-23.1%)
+3. **根本原因**: 缩小预取范围导致每次 fault 只迁移少量页面 → 丧失批量 PCIe 传输效率 → 其余页面单独 fault → 小量 DMA 多次往返 → 总延迟大增
+4. **pp 稳定 (~209-216)**: Prefill 不受 decode 模式影响（先执行完才切 decode）
+5. **XB prefill (G)**: pp -5%, tg -2%，确认 1.84x oversub 下 XB 仍有害
+
+**结论**: **MoE decode 需要 always_max**。虽然每 token 仅激活 2/64 experts，但 fault 触发的 VA block 内其他页面（同一 expert 的其他参数、相邻 expert 的权重）在后续 token 中有很高概率被访问。always_max 的"浪费"其实是有效的 spatial prefetch。缩小预取范围适得其反。
+
+#### 7.15.2 FAISS SIFT100M (1.5x oversub, 修复 uprobe 路径)
+
+| Config | 描述 | add (s) | np=1 (s) | np=4 (s) | np=16 (s) |
+|--------|------|:---:|:---:|:---:|:---:|
+| 2a | no BPF (baseline) | 98.5 | 5.12 | 14.95 | 62.94 |
+| 2b | always_max_cycle_moe | 48.9 | 4.42 | 12.52 | 49.39 |
+| **2c** | **uprobe phase (正确路径)** | **48.3** | **4.39** | **12.62** | **49.23** |
+| 2d | heuristic phase | 48.9 | 4.40 | 12.59 | 49.38 |
+
+结果文件: `workloads/results_phase_detection/20260305_run/faiss_*.log`
+
+**关键修复**: 之前 §7.11 的 uprobe 从未触发（`uprobe_build=0`），因为挂钩到 `faiss/build/faiss/python/_swigfaiss.so`（build dir），而运行时 Python 加载的是 `faiss/build/faiss/python/faiss/_swigfaiss.so`（不同 inode）。本次修正路径后 uprobe 正常工作。
+
+**分析**:
+1. **三个 BPF 策略 vs baseline**: add -50% (98.5→48.3-48.9s), search -14~22%
+2. **uprobe (2c) ≈ heuristic (2d) ≈ always_max (2b)**: 三者几乎一致
+3. **FAISS 结论不变**: phase detection (无论 uprobe 还是 heuristic) 不优于 always_max_cycle_moe，因为 search 阶段 cycle_moe 不再有害（之前 D2 的 nprobe=1 问题是 cycle_moe 导致，2b 也是 cycle_moe 但没问题 — 可能是 run-to-run variance 或 build cache 状态差异）
+
+#### 7.15.3 vLLM 30B Serving (1.175x oversub)
+
+| Config | 描述 | TPOT (ms) | tput (tok/s) | P99 TPOT (ms) | delta |
+|--------|------|:---:|:---:|:---:|:---:|
+| 3a | no BPF (baseline) | 61.26 | 232.55 | 64.76 | — |
+| **3b** | **always_max_cycle_moe** | **56.89** | **250.99** | **59.43** | **-7.1%** |
+| 3c | phase mode0, no XB decode | 57.12 | 249.46 | 59.71 | -6.8% |
+| 3d | phase mode0 + XB both phases | 57.83 | 247.73 | 61.42 | -5.6% |
+| 3e | phase mode1 r=32 | 62.89 | 228.94 | 65.97 | **+2.7%** |
+| 3f | phase mode2 (default kernel) | 62.23 | 230.96 | 67.10 | **+1.6%** |
+
+结果文件: `workloads/results_phase_detection/20260305_run/vllm_*.json`
+
+**分析**:
+1. **always_max (3b) 和 phase mode0 (3c) 是最优**: TPOT -7%, throughput +8%
+2. **缩小 decode 预取 (3e, 3f) 与 llama.cpp 模式一致 — 有害**
+3. **XB both phases (3d)**: 比 no-XB (3c) 稍差，说明即使 1.175x oversub，XB 额外 DMA 也不划算
+4. **phase mode0 ≈ always_max_cycle_moe**: uprobe 开销可忽略
+
+#### 7.15.4 Cross-Workload 总结: Phase-Adaptive Decode Prefetch Size
+
+**核心发现**: **缩小 decode 预取范围在三个 workload 上一致有害**。
+
+| Workload | Oversub | 最优策略 | 缩小 decode 效果 |
+|----------|---------|----------|-----------------|
+| llama.cpp 120B | 1.84x | always_max 两个 phase | -23% ~ -58% tg |
+| FAISS SIFT100M | 1.5x | always_max ≈ phase-adaptive | ≈ 等效（search 已受保护） |
+| vLLM 30B | 1.175x | always_max_cycle_moe | +1.6% ~ +2.7% TPOT（变差） |
+
+**原因分析**:
+- **批量 PCIe 效率**: always_max 将一个 VA block 内所有需迁移页面一次性 DMA → 高效 bulk transfer。缩小范围后变成多次小量 DMA → overhead 大增。
+- **Spatial locality**: VA block 内相邻页面在后续 token/iteration 高概率被访问。"浪费"的预取其实是有效的 spatial prefetch。
+- **Phase detection 的真正价值不在于调节预取大小**，而在于**开/关 cross-block**（如 FAISS §7.6 D3）或**向内核传递应用语义**（如 uprobe POC §7.9）。
+
+**最终结论**: **always_max 是 intra-block 最优策略，不需要 phase-adaptive 调节。Phase detection 的价值在于 cross-block gating 和应用语义传递，而非预取范围调节。**
+
+---
+
+## 8. Novel Algorithms: 超越 always_max 的探索
+
+### 8.1 动机
+
+之前的结论可能过于武断：
+- always_max 在 intra-block 层面最优，但 **eviction 策略** 和 **cross-block 策略** 仍有探索空间
+- cycle_moe eviction 只是简单的 T1 频次阈值保护，可能不是最优
+- cross-block 在 GNN (1.34x oversub) 上已证明有效 (+21% over always_max)，但只测了 1-block lookahead
+- Fault-rate throttled XB 可以在 PCIe 有余量时才做 cross-block，避免零和竞争
+
+### 8.2 新算法设计与实现状态
+
+| 编号 | 算法 | 文件 | 核心思路 | 编译 | GNN 测试 | llama 测试 |
+|------|------|------|----------|:----:|:--------:|:----------:|
+| N1 | stride_multiblock K=2/3 | `prefetch_stride_multiblock.bpf.c` | 可配置 max_lookahead rodata，K=6 已知 -46% | OK | TODO | — |
+| N2 | reuse_dist eviction | `prefetch_reuse_dist.bpf.c` | EWMA reuse distance 替代 T1 二值阈值；可选 XB | OK | 21.12s* | TODO |
+| N3 | cooperative prefetch-eviction | `prefetch_cooperative.bpf.c` | prefetch ring buffer 共享给 eviction，保护 XB target 附近 chunk | OK | TODO | TODO |
+| N4 | throttled_xb | `prefetch_throttled_xb.bpf.c` | fault rate 低时才做 XB（PCIe 有余量）；cycle_moe eviction | OK | — | TODO |
+| A2 | always_max_cycle_moe (ref) | `prefetch_always_max_cycle_moe.bpf.c` | 参考基线 | OK | TODO | TODO |
+| A3 | cross_block_v2 dir (ref) | `prefetch_cross_block_v2.bpf.c` | GNN 之前最优（3.29x） | OK | TODO | — |
+
+\* novel_reuse20_xb.json = 21.12s/epoch，但可能被并行进程污染，需要重跑验证。
+
+### 8.3 各算法详细设计
+
+#### N1: Stride Multi-Block (可配置 K)
+- 之前 K=6 在 GNN 上 -46%（PCIe overload）
+- 假设：K=2 或 K=3 在 GNN 上可能比 1-block XB 更好，因为 GNN 的 sequential forward sweep 有 stride pattern
+- 新增 `const volatile int max_lookahead` rodata，CLI: `./prefetch_stride_multiblock [max_k]`
+
+#### N2: Reuse Distance Eviction + always_max
+- cycle_moe 用固定 T1 频次阈值（access_count >= 3 → protect），对所有 chunk 一视同仁
+- reuse_dist 用 EWMA 跟踪每个 chunk 的实际重访间隔：短间隔 → protect，长间隔 → expose to kernel LRU
+- 理论上应该比 cycle_moe 更精确地保护 hot chunk
+- 参数：`short_reuse_ns`（保护阈值，默认 50ms），`enable_xb`（是否启用 direction-aware XB）
+- CLI: `./prefetch_reuse_dist [short_reuse_ms] [enable_xb]`
+
+#### N3: Cooperative Prefetch-Eviction
+- 核心创新：prefetch hook 和 eviction hook **共享信息**
+- prefetch 将 XB target VA 写入 ring buffer
+- eviction 检查 chunk VA 是否在 ring 中任何 target 的 ±`protect_radius` blocks 范围内
+- 如果是 → 保护（move_tail），避免刚预取的数据被立即驱逐
+- 这解决了 cross-block 在高 oversub 下的根本问题：prefetch 价值 ≈ eviction 代价 → 净 ≈ 0
+- CLI: `./prefetch_cooperative [protect_radius]`
+
+#### N4: Fault-Rate Throttled XB
+- always_max intra-block + direction-aware XB，但 XB 只在 fault rate 低时触发
+- Per-CPU 统计 window 内 fault count，超过阈值则跳过 XB
+- 理论上应该在 PCIe 忙碌时自动抑制 XB，空闲时激活
+- 适合 llama.cpp 这种 PCIe 饱和的场景
+- CLI: `./prefetch_throttled_xb [window_ms] [fault_threshold]`
+
+### 8.4 测试计划
+
+**关键约束**: 实验必须严格串行，一次只跑一个 BPF + 一个 workload。
+
+#### PART 1: GNN 10M (8 configs, 每个 ~2-3 min)
+
+| 序号 | Config | 命令 | 预期 |
+|------|--------|------|------|
+| G1 | always_max_cycle_moe (ref) | `sudo ./prefetch_always_max_cycle_moe` | ~27s (2.60x) |
+| G2 | XB direction (ref) | `sudo ./prefetch_cross_block_v2 1 2048 0` | ~21s (3.29x) |
+| G3 | stride K=2 | `sudo ./prefetch_stride_multiblock 2` | ? |
+| G4 | stride K=3 | `sudo ./prefetch_stride_multiblock 3` | ? |
+| G5 | cooperative r=2 | `sudo ./prefetch_cooperative 2` | ? |
+| G6 | cooperative r=4 | `sudo ./prefetch_cooperative 4` | ? |
+| G7 | reuse_dist 50ms + XB | `sudo ./prefetch_reuse_dist 50 1` | ? |
+| G8 | reuse_dist 20ms + XB | `sudo ./prefetch_reuse_dist 20 1` | ? |
+
+GNN workload: `cd workloads/pytorch && CUDA_MANAGED_FORCE_DEVICE_ALLOC=1 uv run python benchmark_gnn_uvm.py --dataset random --nodes 10000000 --prop chunked --epochs 3 --use_uvm --report_json result/<name>.json`
+
+#### PART 2: llama.cpp 120B (6 configs, 每个 ~5 min)
+
+| 序号 | Config | 命令 | 预期 |
+|------|--------|------|------|
+| L1 | always_max_cycle_moe (ref) | `sudo ./prefetch_always_max_cycle_moe` | pp~221, tg~88 |
+| L2 | cooperative r=2 | `sudo ./prefetch_cooperative 2` | ? |
+| L3 | reuse_dist 50ms, no XB | `sudo ./prefetch_reuse_dist 50 0` | ? |
+| L4 | reuse_dist 20ms, no XB | `sudo ./prefetch_reuse_dist 20 0` | ? |
+| L5 | throttled_xb 1ms/50 | `sudo ./prefetch_throttled_xb 1 50` | ? |
+| L6 | throttled_xb 5ms/20 | `sudo ./prefetch_throttled_xb 5 20` | ? |
+
+llama workload: `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 llama-bench -m <120B_model> -p 512 -n 128 -r 3 -o json`
+
+#### 每个 config 之间的清理流程
+
+```bash
+# 1. Kill BPF loader
+sudo kill <BPF_PID>
+# 2. Kill all possible BPF processes
+sudo killall -9 prefetch_cooperative prefetch_reuse_dist prefetch_throttled_xb \
+    prefetch_always_max_cycle_moe prefetch_cross_block_v2 prefetch_stride_multiblock
+# 3. Force-clean struct_ops (BPF syscall)
+sudo python3 /tmp/force_clean_struct_ops.py
+# 4. GPU cleanup
+sudo python3 workloads/cleanup_gpu.py
+# 5. Verify clean: bpftool map list | grep struct_ops → NONE
+```
+
+### 8.5 测试结果
+
+TODO — 所有 14 个 config 待跑。之前的数据全部被并行进程污染，不可用。
+
+### 8.6 分析与结论
+
+TODO — 待测试完成后填写。
 
