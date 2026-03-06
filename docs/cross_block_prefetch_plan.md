@@ -882,3 +882,231 @@ sudo kill $POLICY_PID; sudo $EXT_DIR/cleanup_struct_ops_tool 2>/dev/null || true
 **结论**: kprobe 优化**不缩小 np=1 gap**（5.54 vs 4.38 = +26.5%）。overhead 不在 kprobe 的 va_space 指针链，而在 struct_ops hook 的 phase detection 逻辑本身（每次 fault 都要更新滑动窗口 + phase 判定，1.4M 次累积）。
 
 **FAISS 总结**: D3 是最终最优配置 — add -31.8%, search np=4/16 持平 always_max。np=1 的 25% gap 是 phase detection overhead 的固有代价，进一步优化回报递减。
+
+### 7.8 Exp-vLLM-Rerun: vLLM 30B 全量重新实验 (2026-03-05)
+
+**背景**: 之前 §7.3 的 vLLM 结论（"always_max P99 TPOT 爆炸 +267%"）被证明是错误的。根本原因是 `serve_bench.py` 的 `cwd` 指向 submodule 目录（触发重新编译）+ benchmark 参数缺失（无 `--request-rate 5 --sharegpt-output-len 512`）。修复后用正确参数重跑 6 个配置。
+
+**硬件**: RTX 5090 32GB, Qwen3-30B-A3B-FP8, `--max-num-seqs 16`, `--enforce-eager`
+**参数**: 100 ShareGPT prompts, rate=5, output_len=512, seed=42
+
+| Config | 策略 | TPOT(ms) | P99 TPOT(ms) | TTFT(ms) | P99 TTFT(ms) | Tput(tok/s) | Duration(s) |
+|--------|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| A | no BPF (baseline) | 60.9 | 64.5 | 76,381 | 172,633 | 233.8 | 218.6 |
+| B | always_max | 56.7 (-6.9%) | 59.0 | 68,136 | 156,510 | 251.6 (+7.6%) | 201.9 |
+| **C** | **always_max + cycle_moe** | **55.1 (-9.5%)** | **57.4** | **66,985** | **151,560** | **256.8 (+9.8%)** | **197.1** |
+| D | XB blind | 56.1 | 58.8 | 67,843 | 155,562 | 252.6 (+8.0%) | 201.2 |
+| E | XB direction | 56.3 | 59.9 | 67,473 | 152,469 | 256.0 (+9.5%) | 197.1 |
+| F | serving_adaptive | 56.3 | 58.7 | 67,658 | 155,166 | 253.5 (+8.4%) | 200.4 |
+
+**关键修正**:
+1. **"always_max 对 vLLM 有害" 结论推翻** — P99 TPOT 全部正常（57-65ms），无爆炸
+2. **所有 BPF 策略均有效**: TPOT -7~10%, throughput +8~10%, TTFT -10~12%
+3. **最佳: Config C (always_max + cycle_moe)** — 与 llama.cpp 和 GNN 一致
+4. **各策略间差异小** (B-F 仅 ~2ms TPOT)，1.175x 低 oversub 下策略区分度有限
+5. **新算法 serving_adaptive** 表现中等，fault-rate gating 在低 oversub 下无额外价值
+
+结果文件: `workloads/vllm/results/exp_vllm_rerun/config_{a..f}_*.json`
+
+---
+
+## 8. 下一步: Novel BPF 算法设计
+
+### 8.0 现有算法总结与瓶颈分析
+
+**已实现策略**:
+- Prefetch: always_max, cross-block (blind/direction/adj-stride), phase-adaptive, serving-adaptive
+- Eviction: cycle_moe (T1 protect), MRU, LFU, FIFO, Belady template
+
+**各 workload 最佳结果与瓶颈**:
+| Workload | Oversub | Best 提升 | 瓶颈 | 改进空间 |
+|----------|---------|-----------|------|---------|
+| GNN 10M | 1.34x | 3.29x (XB direction) | page faults 仍存在 | 多 block 预取可进一步减少 fault |
+| llama.cpp 120B | 1.84x | +78% tg | PCIe bandwidth 饱和 | eviction-prefetch 协同可减少无效迁移 |
+| FAISS SIFT100M | 1.5x | -31.8% add | phase detection 开销 | uprobe 精确 phase 检测 |
+| vLLM 30B | 1.175x | +9.8% tput | 低 oversub 策略区分度小 | 需更高 oversub 或 app-guided prefetch |
+
+### 8.1 Algorithm N1: Stride-Predictive Multi-Block Prefetch
+
+**动机**: 当前 cross-block 只预取相邻 1 个 block。GNN sequential scan 每 epoch 扫描 ~7800 blocks，每个 block 至少 fault 一次。检测 stride 模式后预取 K blocks ahead 可大幅减少 fault。
+
+**算法**:
+```
+状态 (per-CPU):
+  stride_hist[4]     // 最近 4 次 block 间距
+  confidence         // 连续正确预测次数
+  pending_target     // 上次预测的目标地址
+
+gpu_page_prefetch(fault_va):
+  current_block = va_to_block(fault_va)
+  stride = current_block - last_block
+
+  // 更新 stride 历史
+  shift(stride_hist)
+  stride_hist[3] = stride
+
+  // 检测 stride 一致性
+  if all(stride_hist[i] == stride_hist[0] for i in 1..3):
+    confidence = min(confidence + 1, MAX_CONFIDENCE)
+  else:
+    confidence = max(confidence - 2, 0)
+
+  // 预测命中检查
+  if current_block == pending_target:
+    confidence = min(confidence + 2, MAX_CONFIDENCE)
+
+  // 根据 confidence 决定预取深度
+  K = 1 + confidence / 2    // confidence 0→K=1, 10→K=6
+  K = min(K, MAX_LOOKAHEAD)
+
+  // 预取 K 个 block
+  for i in 1..K:
+    target = current_block + i * stride
+    bpf_wq → migrate(target, 2MB)
+
+  pending_target = current_block + stride
+  last_block = current_block
+  return always_max  // intra-block
+```
+
+**与 cross-block_v2 的区别**:
+1. **Multi-block**: 一次预取 K 个 block (K 自适应 1-6)，不是固定 1 个
+2. **Stride-aware**: 检测任意 stride（不限于 ±1 block），适配 strided access
+3. **Confidence-gated**: 预测不准时自动降级到 1-block，不会过度预取
+4. **预测命中反馈**: 检查上次预测是否命中，动态调整信心
+
+**BPF 可行性**: stride_hist PERCPU_ARRAY ✓, K 个 wq_map entries (64×6=384) ✓, bounded for loop ✓
+
+**预期**: GNN +20-50% over XB direction, FAISS add +10%, llama.cpp 退化为 1-block (stride 不固定)
+
+### 8.2 Algorithm N2: Reuse Distance Eviction (Practical Belady)
+
+**动机**: cycle_moe 只做二值分类 (freq≥3 = T1, else non-T1)。Reuse distance（两次访问间隔）提供更精细的排序，是 Belady 算法的实用近似。
+
+**算法**:
+```
+状态:
+  last_access[SLOTS]  // 每个 chunk hash 的上次访问时间戳
+  reuse_dist[SLOTS]   // 每个 chunk hash 的 EWMA reuse distance
+
+gpu_block_access(chunk):
+  h = chunk_hash(chunk)
+  now = bpf_ktime_get_ns()
+  last = last_access[h]
+
+  if last > 0:
+    dist = now - last
+    // EWMA α=0.25: new_rd = 0.75 * old_rd + 0.25 * dist
+    reuse_dist[h] = (reuse_dist[h] * 3 + dist) >> 2
+  last_access[h] = now
+
+  if reuse_dist[h] > 0 and reuse_dist[h] < SHORT_REUSE_THRESHOLD:
+    bpf_gpu_block_move_tail(chunk, list)  // 短 reuse → 保护
+    return BYPASS
+  else:
+    return BYPASS  // 长 reuse 或首次 → 不保护，优先 evict
+```
+
+**与 cycle_moe 的区别**: 连续值排序 vs 二值分类，时间感知，EWMA 自适应
+
+### 8.3 Algorithm N3: Cooperative Prefetch-Eviction
+
+**动机**: prefetch 和 eviction 当前独立运行，有内在矛盾：prefetch 迁入数据 → 触发 eviction → eviction 可能驱逐刚预取的或即将需要的数据。协同设计让 eviction 知道 prefetch 的预测目标。
+
+**算法**:
+```
+共享状态:
+  prefetch_predict_ring[16]  // prefetch 预测目标 VA 环形缓冲区
+
+gpu_page_prefetch(fault_va):
+  predicted_targets = stride_predict(fault_va)
+  // 记录预测目标到共享 ring
+  for target in predicted_targets:
+    prefetch_predict_ring[(head++) % 16] = target
+  // 执行 cross-block prefetch
+  for target in predicted_targets:
+    bpf_wq → migrate(target)
+  return BYPASS
+
+gpu_block_access(chunk):
+  chunk_va = BPF_CORE_READ(chunk, va_block, start)
+  // 检查是否在 prefetch 预测窗口中
+  for i in 0..15:
+    if prefetch_predict_ring[i] overlaps chunk_va:
+      bpf_gpu_block_move_tail(chunk, list)  // 即将被 prefetch 需要 → 强保护
+      return BYPASS
+  // 正常 eviction 逻辑
+  return normal_eviction(chunk)
+```
+
+**核心创新**: Prefetch-informed eviction — 用 prefetch 预测作为 "近似 future knowledge" 传递给 eviction。在高 oversub 场景（llama.cpp 1.84x）最有价值。
+
+### 8.4 Algorithm N4: Online Access Pattern Classifier
+
+**动机**: 当前需手动选择策略。Online classifier 自动检测 access pattern 并切换。
+
+**特征提取** (sliding window N=64 faults):
+- f1 = direction_consistency (连续同方向比例)
+- f2 = stride_variance (stride 方差, 归一化)
+- f3 = unique_blocks_ratio (唯一 block 数 / N)
+- f4 = fault_rate (faults/ms)
+
+**分类 → 策略映射**:
+- SEQUENTIAL (f1>0.8, f2<0.2) → always_max + multi-block XB
+- STRIDED (f1>0.6, f2<0.4) → always_max + 1-block XB
+- RANDOM (f1<0.4) → kernel default (skip prefetch)
+- PHASE_CYCLE → phase-adaptive
+
+**与 phase-adaptive 区别**: 4+ 模式 vs 2 阶段，特征驱动，泛化到任意 workload
+
+### 8.5 Algorithm N5: Application-Guided Prefetch via uprobe
+
+**动机**: 所有上述算法都是 reactive（fault 驱动）或 pattern-guessing。uprobe 可以从应用层获取精确语义信息，实现 proactive prefetch。
+
+**关键洞察**: `bpf_gpu_migrate_range()` 是 sleepable kfunc，可从 bpf_wq 回调调用。不限于 struct_ops — **任何 BPF 程序（uprobe/tracepoint/fentry）都可通过 bpf_wq 触发 GPU 迁移**。
+
+**信息来源对比**:
+| 方式 | 信息来源 | 精准度 | 时机 |
+|------|---------|--------|------|
+| struct_ops (fault-driven) | GPU page fault | 被动 | fault 后（已迟） |
+| kprobe (kernel-driven) | 内核函数调用 | 中等 | 内核事件时 |
+| **uprobe (app-guided)** | **用户态函数** | **最高（有应用语义）** | **fault 前（proactive）** |
+
+**场景**:
+
+**a) vLLM KV-cache lifecycle**:
+- uprobe on `cudaMallocManaged` → 记录 KV-cache VA 范围
+- uprobe on request dispatch → 知道哪个 request 的 KV 即将被访问
+- 提前 migrate 对应 KV pages
+
+**b) PyTorch GNN epoch boundary**:
+- uprobe on `forward()` 入口 → 知道新 epoch 开始
+- 立即 bpf_wq → migrate 前几个 feature blocks
+- 比 fault-driven 提前一步
+
+**c) FAISS 精确 phase detection**:
+- uprobe on `IndexIVFFlat::add()` / `search()` → 精确知道当前阶段
+- 零开销 phase 检测（不需要 fault pattern 猜测）
+- 解决 np=1 的 25% gap（phase detection overhead 消除）
+
+**d) llama.cpp layer prefetch**:
+- uprobe on GGML op dispatch → 知道当前 layer
+- 提前 migrate 下一 layer 的 expert weights
+- 精确时序控制（不靠 fault pattern 推测 layer boundary）
+
+**核心价值**: Application-transparent（应用不需改代码），BPF-mediated proactive GPU memory management。
+
+### 8.6 实现优先级
+
+| 算法 | 新颖度 | 预期改进 | 复杂度 | 优先级 |
+|------|--------|----------|--------|--------|
+| N1 Stride-Predictive Multi-Block | ★★★★ | GNN +20-50%, FAISS +10% | 中 | **P0** |
+| N5 uprobe App-Guided (FAISS) | ★★★★★ | FAISS np=1 -25% gap | 中 | **P0** |
+| N3 Cooperative Prefetch-Eviction | ★★★★★ | llama.cpp high-oversub +10-20% | 中 | **P1** |
+| N2 Reuse Distance Eviction | ★★★ | llama.cpp/vLLM +5-15% | 低 | **P1** |
+| N4 Online Pattern Classifier | ★★★★ | 通用性提升 | 高 | P2 |
+
+**推荐路线**:
+1. 先实现 N1 (Stride-Predictive) 在 GNN 上验证 — 效果最可量化
+2. 同时实现 N5-c (uprobe FAISS phase) — 解决已知 25% gap
+3. 然后 N3 (Cooperative) 在 llama.cpp 验证 — 解决 PCIe 零和
