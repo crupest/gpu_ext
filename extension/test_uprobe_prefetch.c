@@ -29,13 +29,21 @@ int main(int argc, char **argv) {
     int err;
 
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <path-to-target-binary> [func-name]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <path-to-target-binary> [func-name] [--direct]\n", argv[0]);
         fprintf(stderr, "  Attaches uprobe to 'request_prefetch' in the target binary.\n");
+        fprintf(stderr, "  --direct: use sleepable uprobe with direct kfunc call (no bpf_wq)\n");
         return 1;
     }
 
     const char *target_path = argv[1];
-    const char *func_name = argc > 2 ? argv[2] : "request_prefetch";
+    const char *func_name = "request_prefetch";
+    int use_direct = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--direct") == 0)
+            use_direct = 1;
+        else
+            func_name = argv[i];
+    }
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -78,8 +86,11 @@ int main(int argc, char **argv) {
         .func_name = func_name,
         .retprobe = false,
     );
+    struct bpf_program *uprobe_prog = use_direct
+        ? skel->progs.uprobe_direct_prefetch
+        : skel->progs.uprobe_request_prefetch;
     link_uprobe = bpf_program__attach_uprobe_opts(
-        skel->progs.uprobe_request_prefetch,
+        uprobe_prog,
         -1, /* all PIDs */
         target_path,
         0,  /* offset (resolved by func_name) */
@@ -91,7 +102,9 @@ int main(int argc, char **argv) {
                 target_path, func_name, strerror(-err));
         goto cleanup;
     }
-    printf("uprobe attached: %s:%s\n", target_path, func_name);
+    printf("uprobe attached (%s): %s:%s\n",
+           use_direct ? "direct kfunc" : "pending_map relay",
+           target_path, func_name);
 
     printf("\nUprobe prefetch POC running. Now start the target binary.\n");
     printf("Press Ctrl-C to exit...\n\n");

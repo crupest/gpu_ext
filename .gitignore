@@ -39,21 +39,26 @@ scripts/sched/llama_server_test/results/
 __pycache__/
 *.pyc
 
-# Extension binaries (built from source)
-extension/eviction_cycle_moe
-extension/prefetch_template_belady
-extension/prefetch_always_max_cycle_moe
-extension/prefetch_cross_block
-extension/prefetch_cross_block_v2
-extension/prefetch_max_passive_mru
-extension/eviction_lfu_xcoord
-extension/prefetch_proactive_layer
-extension/sched_gpu_baseline
-extension/sched_gpu_minimal
-extension/sched_gpu_serving
-
 # Extension build artifacts
 extension/.output/
+
+# Extension compiled binaries (all ELF executables built from source)
+# Pattern: any file without extension in extension/ that's a binary
+extension/chunk_trace
+extension/cleanup_struct_ops_tool
+extension/eviction_*
+extension/gpu_preempt_ctrl
+extension/gpu_sched_set_timeslices
+extension/gpu_sched_trace
+extension/prefetch_*
+extension/sched_gpu_*
+extension/struct_ops
+extension/test_*
+extension/uprobe_bench
+
+# Extension experiment scripts and results
+extension/results_*
+extension/run_*_bench.sh
 
 # Presentation build output
 docs/presentation/*/dist/

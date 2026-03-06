@@ -122,7 +122,7 @@ static int do_prefetch_cb(void *map, int *key, void *value)
     return 0;
 }
 
-/* ===== uprobe: write request to pending_map (no bpf_wq here) ===== */
+/* ===== uprobe: write request to pending_map (fallback if direct kfunc unavailable) ===== */
 
 SEC("uprobe")
 int BPF_UPROBE(uprobe_request_prefetch, void *addr, size_t length)
@@ -141,6 +141,36 @@ int BPF_UPROBE(uprobe_request_prefetch, void *addr, size_t length)
     bpf_printk("uprobe: queued prefetch addr=0x%llx len=%llu\n",
                (u64)addr, (u64)length);
 
+    return 0;
+}
+
+/* ===== sleepable uprobe: directly call bpf_gpu_migrate_range ===== */
+
+SEC("uprobe.s")
+int BPF_UPROBE(uprobe_direct_prefetch, void *addr, size_t length)
+{
+    stat_inc(STAT_UPROBE_FIRE);
+
+    u32 key = 0;
+    u64 *vs = bpf_map_lookup_elem(&va_space_map, &key);
+    if (!vs || !*vs) {
+        bpf_printk("uprobe_direct: no va_space yet\n");
+        return 0;
+    }
+
+    u64 target_addr = (u64)addr;
+    u64 target_len = (u64)length;
+
+    bpf_printk("uprobe_direct: migrate addr=0x%llx len=%llu\n",
+               target_addr, target_len);
+
+    int ret = bpf_gpu_migrate_range(*vs, target_addr, target_len);
+    if (ret == 0)
+        stat_inc(STAT_MIGRATE_OK);
+    else
+        stat_inc(STAT_MIGRATE_FAIL);
+
+    stat_inc(STAT_WQ_SCHED); /* reuse counter for direct calls */
     return 0;
 }
 

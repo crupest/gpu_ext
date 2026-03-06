@@ -1110,3 +1110,66 @@ gpu_block_access(chunk):
 1. 先实现 N1 (Stride-Predictive) 在 GNN 上验证 — 效果最可量化
 2. 同时实现 N5-c (uprobe FAISS phase) — 解决已知 25% gap
 3. 然后 N3 (Cooperative) 在 llama.cpp 验证 — 解决 PCIe 零和
+
+---
+
+## §9 Uprobe Prefetch POC 实现与验证 (2026-03-05)
+
+### 9.1 架构
+
+三层 pipeline:
+1. **kprobe** on `uvm_perf_prefetch_get_hint_va_block` — 捕获 `va_space` handle
+2. **uprobe** on 应用的 `request_prefetch(addr, len)` — 写 pending_map 或直接调用 kfunc
+3. **struct_ops** `gpu_page_prefetch` — always_max + 从 pending_map 取请求，通过 bpf_wq 调用 `bpf_gpu_migrate_range()`
+
+**关键发现**: `bpf_wq` 不允许在 tracing (uprobe/kprobe) 程序中使用 — "tracing progs cannot use bpf_wq yet"。
+
+**两种 workaround**:
+- **pending_map relay**: uprobe 写 pending_map → struct_ops 在下次 fault 时 drain → bpf_wq → migrate（延迟大）
+- **sleepable uprobe + direct kfunc** (`SEC("uprobe.s")`): 在内核模块中额外注册 `register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE, &uvm_bpf_kfunc_set)`，让 uprobe.s 直接调用 `bpf_gpu_migrate_range()`（**零延迟，同步执行**）
+
+内核改动仅一行:
+```c
+// uvm_bpf_struct_ops.c:334
+register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE, &uvm_bpf_kfunc_set);
+```
+
+文件: `extension/test_uprobe_prefetch.bpf.c`, `test_uprobe_prefetch.c`, `test_uprobe_prefetch_target.cu`
+
+### 9.2 Benchmark 结果: 40GB sequential chunked (1.25x oversub)
+
+| Config | 说明 | iter 0 (ms) | iter 1 (ms) | iter 2 (ms) |
+|--------|------|-------------|-------------|-------------|
+| A | 无 BPF (基线) | 10919 (3.8 GB/s) | 13034 (3.2 GB/s) | 12148 (3.5 GB/s) |
+| B | always_max only | 2009 (20.9 GB/s) | 4051 (10.4 GB/s) | 3006 (13.9 GB/s) |
+| **C** | **uprobe + always_max** | **788 (53.2 GB/s)** | **2352 (17.8 GB/s)** | **2223 (18.9 GB/s)** |
+| D | uprobe 加载但不触发 (控制) | 2012 (20.8 GB/s) | 4074 (10.3 GB/s) | 3012 (13.9 GB/s) |
+
+**分析**:
+- **B vs A**: always_max 带来 ~3-4x 加速（一贯结果）
+- **C vs B**: uprobe hints 带来 **额外 40-60% 加速**。iter 0: 788ms vs 2009ms = **2.5x 更快**
+- **D ≈ B**: 控制组确认改善来自 hints 本身，不是 BPF 加载开销
+- **iter 0 最快**: 数据从 CPU 初始化后首次顺序访问，prefetch pipeline 最有效
+- **原理**: GPU 处理 chunk N 的同时，BPF 已开始 DMA 迁移 chunk N+1 — pipeline 效果
+
+### 9.3 改进方向: Multi-Chunk Prefetch Pipeline
+
+当前 POC 的局限:
+1. **单 pending slot**: 只有 1 个 pending_map entry，新请求覆盖旧请求
+2. **单 bpf_wq**: 只有 1 个 work item，无法并行多个 migrate
+3. **无 prefetch depth 控制**: 每次只 hint 下一个 chunk，无法 pipeline 多个
+
+**改进设计: Multi-Slot Ring Buffer + Prefetch Depth**:
+
+```
+pending_ring[8]:  slot 0  slot 1  slot 2  ...  slot 7
+                   ↑ read_idx             ↑ write_idx
+uprobe writes → write_idx++ (producer)
+struct_ops reads → read_idx++ (consumer, schedules bpf_wq)
+```
+
+- 应用 hint 未来 N 个 chunk（prefetch_depth=2-4）
+- struct_ops 同时 schedule 多个 bpf_wq（不同 wq_map slots）
+- 实现 pipeline depth > 1: 同时有 2-4 个 DMA 在飞
+
+**预期**: iter 1-2 的 gap 应该缩小（更好的 prefetch coverage）
