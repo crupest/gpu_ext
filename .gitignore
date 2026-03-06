@@ -56,9 +56,11 @@ extension/struct_ops
 extension/test_*
 extension/uprobe_bench
 
-# Extension experiment scripts and results
+# Extension experiment results
 extension/results_*
-extension/run_*_bench.sh
+
+# Microbench compiled binaries
+microbench/memory/uprobe_bench
 
 # Presentation build output
 docs/presentation/*/dist/
