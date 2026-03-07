@@ -75,7 +75,13 @@ Cross-VA-block prefetch 通过 `bpf_wq` + `bpf_gpu_migrate_range()` kfunc 异步
 - 需要 **phase-aware** 策略：build 时开启 cross-block，search 时关闭
 - SIFT100M (48GB, 1.5x): 中等 oversub，PCIe 有一定余量
 
-## 3. Per-Workload 算法设计
+## 3. Per-Workload 算法设计（初始设计）
+
+> 注: 以下为初始设计方案。实际实现演化为 §8 中的 N1-N6 算法，部分文件名有变化：
+> - `prefetch_gnn_sequential.bpf.c` → 实际用 `prefetch_stride_multiblock.bpf.c` + `prefetch_cross_block_v2`
+> - `prefetch_vllm_kv_crossblock.bpf.c` → 未实现，改用 `prefetch_vllm_phase.bpf.c`
+> - `prefetch_llama_phase_gated.bpf.c` → 实际用 `prefetch_llama_phase.bpf.c`
+> - `prefetch_faiss_phase.bpf.c` → 已实现（与设计一致）
 
 ### 3.1 llama.cpp: Phase-Gated Cross-Block
 
@@ -273,14 +279,16 @@ gpu_page_prefetch(fault_va):
 | per-CPU direction cache | `prefetch_cross_block_v2.bpf.c` | ✅ 已实现 |
 | eviction policy (cycle_moe/LFU) | 各策略独立配置 | ✅ 已实现 |
 
-**新增需要实现的**：
+**以下组件均已实现**：
 
-| 组件 | 用途 | 复杂度 |
-|------|------|--------|
-| VA region 分类 map | vLLM KV vs weight 区分 | 中（需 uprobe hook） |
-| Phase 自动检测 | FAISS build vs search | 低（方向一致率统计） |
-| Multi-block prefetch | GNN 多 block 前瞻 | 低（多次 bpf_wq_start） |
-| Fault rate phase 检测 | llama.cpp prefill vs decode | 低（已有 fault counter） |
+| 组件 | 用途 | 实现文件 | 状态 |
+|------|------|----------|------|
+| Phase 自动检测 (heuristic) | FAISS build vs search | `prefetch_faiss_phase.bpf.c` | ✅ (§7.5-7.6) |
+| Phase 检测 (uprobe) | FAISS/llama/vLLM | `prefetch_faiss_uprobe/llama_phase/vllm_phase.bpf.c` | ✅ (§7.11-7.13) |
+| Multi-block prefetch | GNN 多 block 前瞻 | `prefetch_stride_multiblock.bpf.c` | ✅ (§7.10, K=6 退化) |
+| Cooperative eviction | prefetch-eviction 协同 | `prefetch_cooperative.bpf.c` | ✅ 已测试 (§8.10 G5/G6/L2) |
+| Reuse distance eviction | EWMA 重访间隔 | `prefetch_reuse_dist.bpf.c` | ✅ 已测试 (§8.10 G7/G8/L3/L4) |
+| Throttled XB | fault rate 自适应 XB | `prefetch_throttled_xb.bpf.c` | ✅ 已测试 (§8.10 L5/L6) |
 
 ## 5. 实验设计与运行指南
 
@@ -642,16 +650,16 @@ sudo kill $POLICY_PID; wait $POLICY_PID 2>/dev/null || true
 4. **Subagent 执行**: 每个 Exp 可由单个 subagent 串行执行。不同 Exp 之间也必须串行（GPU 独占）。
 5. **结果文件**: JSON 结果提交到 git（小文件，作为实验记录）。
 
-## 6. 实现优先级
+## 6. 实现优先级（已完成）
 
-| 优先级 | Workload | 算法 | 新 BPF 文件 | 理由 |
-|--------|----------|------|------------|------|
-| **P0** | PyTorch GNN | multi-block sequential | `prefetch_gnn_sequential.bpf.c` | 最可能成功：strict sequential + 中等 oversub + microbench 已验证 |
-| **P0** | FAISS | phase-adaptive | `prefetch_faiss_phase.bpf.c` | Build 同样 strict sequential；phase 检测简单 |
-| **P1** | vLLM | region-aware KV | `prefetch_vllm_kv_crossblock.bpf.c` | 需 uprobe hook 做 region 分类，复杂度中等 |
-| **P2** | llama.cpp | phase-gated | `prefetch_llama_phase_gated.bpf.c` | 已知 prefill 占比小，预期 marginal |
+| 原优先级 | Workload | 算法 | 实际实现 | 状态 |
+|----------|----------|------|----------|------|
+| **P0** | PyTorch GNN | multi-block sequential | `prefetch_cross_block_v2` (XB dir) + `prefetch_stride_multiblock` | ✅ XB dir **3.29x** (§7.1), stride K=6 退化 (§7.10) |
+| **P0** | FAISS | phase-adaptive | `prefetch_faiss_phase` + `prefetch_faiss_uprobe` | ✅ add **-31.8%**, uprobe ≈ heuristic (§7.5-7.6, §7.11) |
+| **P1** | vLLM | region-aware → phase-gated | `prefetch_vllm_phase` + `prefetch_serving_adaptive` | ✅ always_max+cycle_moe 最优 **+9.8%** (§7.8, §7.13) |
+| **P2** | llama.cpp | phase-gated | `prefetch_llama_phase` | ✅ XB 无益于 1.84x oversub (§7.12) |
 
-**快速验证路径**: 在实现新算法前，先用现有 `prefetch_cross_block_v2` 在 GNN 和 FAISS 上跑 baseline + direction-aware (mode 0) 对比。如果 direction-aware 在这两个 workload 上已有显著提升，则新算法的价值是进一步优化而非从零开始。
+**快速验证路径** ✅ 已完成: cross_block_v2 direction-aware 在 GNN 上 +21% over always_max (§7.1 A3)，在 FAISS search 阶段回退 (§7.2 C)。
 
 ## 7. 实验结果
 
@@ -714,6 +722,8 @@ A4 epoch times: 24.27, 24.31, 24.36 (σ<0.05s)
 
 ### 7.3 Exp-XB2: vLLM Qwen3-30B-A3B-FP8 Serving (100 ShareGPT prompts, UVM mode)
 
+> ⚠️ **以下数据已失效** — `serve_bench.py` 的 cwd 和参数有误，导致 P99 TPOT 异常。正确结果见 **§7.8 Exp-vLLM-Rerun**（"always_max P99 TPOT 爆炸 +267%" 结论已推翻）。
+
 **硬件**: RTX 5090 32GB, Qwen3-30B-A3B-FP8, `--max-num-seqs 16`, `--enforce-eager`
 
 | Config | 策略 | Mean TTFT (ms) | P99 TTFT (ms) | Mean TPOT (ms) | P99 TPOT (ms) | Throughput (tok/s) |
@@ -771,7 +781,7 @@ cd $VLLM_DIR && uv run python configs/serve_bench.py --mode uvm --prompts 100 --
 - P99 TPOT 1455ms 好于 always_max (2760ms) 但差于 baseline (751ms) 和 blind XB (740ms)
 - Throughput 60.27 ≈ always_max (60.37)，均来自 intra-block always_max
 
-**vLLM 总结**: 1.175x 低 oversub 下，prefetch 策略对 serving 无显著正面影响。aggressive prefetch 反而有害（P99 spike）。最佳策略是 no-BPF 或最保守的 blind XB。region-aware KV 策略**降级为 P3**，因为 fundamental bottleneck 不在 prefetch。
+**vLLM 总结** ⚠️ **此结论已失效**（见 §7.8）: 实际 always_max+cycle_moe 是最优 (+9.8% tput)，P99 TPOT 正常。原 P99 爆炸是 benchmark 参数错误导致。
 
 ### 7.4 Exp-XB5: Microbench 回归测试
 
@@ -1049,12 +1059,12 @@ Epoch times:
 - Eviction: cycle_moe (T1 protect), MRU, LFU, FIFO, Belady template
 
 **各 workload 最佳结果与瓶颈**:
-| Workload | Oversub | Best 提升 | 瓶颈 | 改进空间 |
+| Workload | Oversub | Best 提升 | 瓶颈 | §8.10 验证结论 |
 |----------|---------|-----------|------|---------|
-| GNN 10M | 1.34x | 3.29x (XB direction) | page faults 仍存在 | 多 block 预取可进一步减少 fault |
-| llama.cpp 120B | 1.84x | +78% tg | PCIe bandwidth 饱和 | eviction-prefetch 协同可减少无效迁移 |
-| FAISS SIFT100M | 1.5x | -31.8% add | phase detection 开销 | uprobe 精确 phase 检测 |
-| vLLM 30B | 1.175x | +9.8% tput | 低 oversub 策略区分度小 | 需更高 oversub 或 app-guided prefetch |
+| GNN 10M | 1.34x | 3.33x (cooperative/reuse+XB) | PCIe 余量有限 | 多 block 预取退化 (K=2: -14%), 1-block XB 是最优 (§8.10 G3-G8) |
+| llama.cpp 120B | 1.84x | +78% tg (always_max) | PCIe bandwidth 饱和 | cooperative -19% tg, eviction 策略无差异 (§8.10 L1-L6) |
+| FAISS SIFT100M | 1.5x | -31.8% add | phase detection 开销 | uprobe ≈ heuristic ≈ always_max (§7.11, §7.15.2) |
+| vLLM 30B | 1.175x | +9.8% tput | 低 oversub 策略区分度小 | 所有 BPF 策略均有效 +8-10%, 差异小 (§7.8) |
 
 ### 8.1 Algorithm N1: Stride-Predictive Multi-Block Prefetch
 
@@ -1275,7 +1285,7 @@ uprobe 精确检测 phase boundary，zero per-fault overhead。
 - DECODE: always_max only + cycle_moe eviction (no cross-block)
 
 文件: `extension/prefetch_llama_phase.bpf.c`, `prefetch_llama_phase.c`
-状态: **已实现，已编译，待测试**
+状态: **已测试** — pp -28%, tg neutral (§7.12)。1.84x oversub 下 XB 在 prefill 有害，decode 正确保护。
 
 #### 8.6.2 vLLM Phase Detection
 
@@ -1291,7 +1301,7 @@ uprobe 精确检测 phase boundary，zero per-fault overhead。
 **策略**: 与 llama.cpp 相同 — PREFILL 开 cross-block，DECODE 关。
 
 文件: `extension/prefetch_vllm_phase.bpf.c`, `prefetch_vllm_phase.c`
-状态: **已实现，已编译，待测试**
+状态: **已测试** — ≈ baseline, P99 regression (§7.13)。Decode 也从 XB 受益，phase gating 去除了有益预取。
 
 ### 8.7 实现优先级
 
@@ -1303,19 +1313,21 @@ uprobe 精确检测 phase boundary，zero per-fault overhead。
 | N6 uprobe llama.cpp Phase | ★★★★★ | pp -28%, tg neutral (§7.12) | 低 | **已验证 ✗ (PCIe saturated)** |
 | N6 uprobe vLLM Phase | ★★★★★ | ≈baseline, P99 regression (§7.13) | 中 | **已验证 ✗ (decode needs XB)** |
 | N7 Phase-Adaptive Decode Size | ★★★ | **一致有害** -23~-58% tg (§7.15) | 低 | **已验证 ✗ (batch efficiency loss)** |
-| N3 Cooperative Prefetch-Eviction | ★★★★★ | llama.cpp high-oversub +10-20% | 中 | P1 |
-| N2 Reuse Distance Eviction | ★★★ | llama.cpp/vLLM +5-15% | 低 | P1 |
-| N4 Online Pattern Classifier | ★★★★ | 通用性提升 | 高 | P2 |
+| N3 Cooperative Prefetch-Eviction | ★★★★★ | GNN ≈ XB dir, llama -19% tg | 中 | **已测试 ✗ (§8.10 G5/L2)** |
+| N2 Reuse Distance Eviction | ★★★ | GNN ≈ XB dir, llama ≈ cycle_moe | 低 | **已测试 ≈ (§8.10 G7-G8/L3-L4)** |
+| N4 Online Pattern Classifier | ★★★★ | 通用性提升 | 高 | 低优先级（oversub ratio 决定一切，无需复杂分类器） |
 
 **下一步**:
 1. ~~N5 FAISS uprobe~~ **完成** — 与 D3 heuristic 等效（§7.11）
 2. ~~N6 llama.cpp phase~~ **完成** — XB 无益于 1.84x oversub（§7.12）
 3. ~~N6 vLLM phase~~ **完成** — ≈baseline, decode 也需要 XB（§7.13）
 4. ~~N7 Phase-adaptive decode prefetch size~~ **完成** — 缩小 decode 预取一致有害（§7.15）
-5. N1 降级版（MAX_LOOKAHEAD=2）重测 GNN
-6. N3 Cooperative 在 llama.cpp 验证
+5. ~~N1 降级版（MAX_LOOKAHEAD=2）重测 GNN~~ **完成** — K=2/3 均退化 30.8s (§8.10 G3/G4)
+6. ~~N3 Cooperative 在 llama.cpp 验证~~ **完成** — tg -19%, XB 有害 (§8.10 L2)
 
 ### 7.15 Exp-N7: Phase-Adaptive Decode Prefetch Size (2026-03-05)
+
+> 注: 此节属于 §7 实验结果系列，放在 §8.7 之后是因为它测试了 §8.6 (N6/N7) 的策略。
 
 **动机**: 之前 N6 只测了"XB 在 prefill 阶段开/关"。用户指出测试不够充分，应该迭代 decode 阶段的 intra-block 预取范围：如果 MoE decode 是 sparse random，也许缩小预取范围（而非整个 VA block）能减少浪费。
 
@@ -1403,61 +1415,20 @@ uprobe 精确检测 phase boundary，zero per-fault overhead。
 
 **最终结论**: **always_max 是 intra-block 最优策略，不需要 phase-adaptive 调节。Phase detection 的价值在于 cross-block gating 和应用语义传递，而非预取范围调节。**
 
----
-
-## 8. Novel Algorithms: 超越 always_max 的探索
-
-### 8.1 动机
-
-之前的结论可能过于武断：
-- always_max 在 intra-block 层面最优，但 **eviction 策略** 和 **cross-block 策略** 仍有探索空间
-- cycle_moe eviction 只是简单的 T1 频次阈值保护，可能不是最优
-- cross-block 在 GNN (1.34x oversub) 上已证明有效 (+21% over always_max)，但只测了 1-block lookahead
-- Fault-rate throttled XB 可以在 PCIe 有余量时才做 cross-block，避免零和竞争
-
-### 8.2 新算法设计与实现状态
+### 8.8 新算法实现状态（N1-N4 + 参考基线）
 
 | 编号 | 算法 | 文件 | 核心思路 | 编译 | GNN 测试 | llama 测试 |
 |------|------|------|----------|:----:|:--------:|:----------:|
-| N1 | stride_multiblock K=2/3 | `prefetch_stride_multiblock.bpf.c` | 可配置 max_lookahead rodata，K=6 已知 -46% | OK | TODO | — |
-| N2 | reuse_dist eviction | `prefetch_reuse_dist.bpf.c` | EWMA reuse distance 替代 T1 二值阈值；可选 XB | OK | 21.12s* | TODO |
-| N3 | cooperative prefetch-eviction | `prefetch_cooperative.bpf.c` | prefetch ring buffer 共享给 eviction，保护 XB target 附近 chunk | OK | TODO | TODO |
-| N4 | throttled_xb | `prefetch_throttled_xb.bpf.c` | fault rate 低时才做 XB（PCIe 有余量）；cycle_moe eviction | OK | — | TODO |
-| A2 | always_max_cycle_moe (ref) | `prefetch_always_max_cycle_moe.bpf.c` | 参考基线 | OK | TODO | TODO |
-| A3 | cross_block_v2 dir (ref) | `prefetch_cross_block_v2.bpf.c` | GNN 之前最优（3.29x） | OK | TODO | — |
+| N1 | stride_multiblock K=2/3 | `prefetch_stride_multiblock.bpf.c` | 可配置 max_lookahead rodata，K=6 已知 -46% | OK | K=2: 30.81s, K=3: 30.73s (退化, §8.10 G3/G4) | — |
+| N2 | reuse_dist eviction | `prefetch_reuse_dist.bpf.c` | EWMA reuse distance 替代 T1 二值阈值；可选 XB | OK | 50ms: 21.16s, 20ms: 21.04s (≈XB dir, §8.10 G7/G8) | 50ms: tg=91.64, 20ms: tg=91.29 (≈cycle_moe, §8.10 L3/L4) |
+| N3 | cooperative prefetch-eviction | `prefetch_cooperative.bpf.c` | prefetch ring buffer 共享给 eviction，保护 XB target 附近 chunk | OK | r=2: 21.09s, r=4: 21.15s (≈XB dir, §8.10 G5/G6) | r=2: tg=74.32 (-19%, §8.10 L2) |
+| N4 | throttled_xb | `prefetch_throttled_xb.bpf.c` | fault rate 低时才做 XB（PCIe 有余量）；cycle_moe eviction | OK | — | 1ms/50: tg=73.57, 5ms/20: tg=82.37 (有害, §8.10 L5/L6) |
+| A2 | always_max_cycle_moe (ref) | `prefetch_always_max_cycle_moe.bpf.c` | 参考基线 | OK | 26.70s (2.63x, §8.10 G1) | pp=230.96, tg=91.97 (§8.10 L1) |
+| A3 | cross_block_v2 dir (ref) | `prefetch_cross_block_v2.bpf.c` | GNN 最优（3.29x） | OK | 21.14s (3.29x, §8.10 G2) | — |
 
-\* novel_reuse20_xb.json = 21.12s/epoch，但可能被并行进程污染，需要重跑验证。
+> 注: N1-N4 算法详细设计见 §8.1-§8.4，此处不再重复。
 
-### 8.3 各算法详细设计
-
-#### N1: Stride Multi-Block (可配置 K)
-- 之前 K=6 在 GNN 上 -46%（PCIe overload）
-- 假设：K=2 或 K=3 在 GNN 上可能比 1-block XB 更好，因为 GNN 的 sequential forward sweep 有 stride pattern
-- 新增 `const volatile int max_lookahead` rodata，CLI: `./prefetch_stride_multiblock [max_k]`
-
-#### N2: Reuse Distance Eviction + always_max
-- cycle_moe 用固定 T1 频次阈值（access_count >= 3 → protect），对所有 chunk 一视同仁
-- reuse_dist 用 EWMA 跟踪每个 chunk 的实际重访间隔：短间隔 → protect，长间隔 → expose to kernel LRU
-- 理论上应该比 cycle_moe 更精确地保护 hot chunk
-- 参数：`short_reuse_ns`（保护阈值，默认 50ms），`enable_xb`（是否启用 direction-aware XB）
-- CLI: `./prefetch_reuse_dist [short_reuse_ms] [enable_xb]`
-
-#### N3: Cooperative Prefetch-Eviction
-- 核心创新：prefetch hook 和 eviction hook **共享信息**
-- prefetch 将 XB target VA 写入 ring buffer
-- eviction 检查 chunk VA 是否在 ring 中任何 target 的 ±`protect_radius` blocks 范围内
-- 如果是 → 保护（move_tail），避免刚预取的数据被立即驱逐
-- 这解决了 cross-block 在高 oversub 下的根本问题：prefetch 价值 ≈ eviction 代价 → 净 ≈ 0
-- CLI: `./prefetch_cooperative [protect_radius]`
-
-#### N4: Fault-Rate Throttled XB
-- always_max intra-block + direction-aware XB，但 XB 只在 fault rate 低时触发
-- Per-CPU 统计 window 内 fault count，超过阈值则跳过 XB
-- 理论上应该在 PCIe 忙碌时自动抑制 XB，空闲时激活
-- 适合 llama.cpp 这种 PCIe 饱和的场景
-- CLI: `./prefetch_throttled_xb [window_ms] [fault_threshold]`
-
-### 8.4 测试计划
+### 8.9 待测试计划
 
 **关键约束**: 实验必须严格串行，一次只跑一个 BPF + 一个 workload。
 
@@ -1472,7 +1443,7 @@ uprobe 精确检测 phase boundary，zero per-fault overhead。
 | G5 | cooperative r=2 | `sudo ./prefetch_cooperative 2` | ? |
 | G6 | cooperative r=4 | `sudo ./prefetch_cooperative 4` | ? |
 | G7 | reuse_dist 50ms + XB | `sudo ./prefetch_reuse_dist 50 1` | ? |
-| G8 | reuse_dist 20ms + XB | `sudo ./prefetch_reuse_dist 20 1` | ? |
+| G8 | reuse_dist 20ms + XB | `sudo ./prefetch_reuse_dist 20 1` | 21.04s (3.33x) |
 
 GNN workload: `cd workloads/pytorch && CUDA_MANAGED_FORCE_DEVICE_ALLOC=1 uv run python benchmark_gnn_uvm.py --dataset random --nodes 10000000 --prop chunked --epochs 3 --use_uvm --report_json result/<name>.json`
 
@@ -1482,7 +1453,7 @@ GNN workload: `cd workloads/pytorch && CUDA_MANAGED_FORCE_DEVICE_ALLOC=1 uv run 
 |------|--------|------|------|
 | L1 | always_max_cycle_moe (ref) | `sudo ./prefetch_always_max_cycle_moe` | pp~221, tg~88 |
 | L2 | cooperative r=2 | `sudo ./prefetch_cooperative 2` | ? |
-| L3 | reuse_dist 50ms, no XB | `sudo ./prefetch_reuse_dist 50 0` | ? |
+| L3 | reuse_dist 50ms, no XB | `sudo ./prefetch_reuse_dist 50 0` | pp=230.26, tg=91.64 |
 | L4 | reuse_dist 20ms, no XB | `sudo ./prefetch_reuse_dist 20 0` | ? |
 | L5 | throttled_xb 1ms/50 | `sudo ./prefetch_throttled_xb 1 50` | ? |
 | L6 | throttled_xb 5ms/20 | `sudo ./prefetch_throttled_xb 5 20` | ? |
@@ -1504,11 +1475,53 @@ sudo python3 workloads/cleanup_gpu.py
 # 5. Verify clean: bpftool map list | grep struct_ops → NONE
 ```
 
-### 8.5 测试结果
+### 8.10 测试结果
 
-TODO — 所有 14 个 config 待跑。之前的数据全部被并行进程污染，不可用。
+#### GNN 10M 结果
 
-### 8.6 分析与结论
+| Config | 策略 | avg epoch (s) | vs baseline (70.15s) |
+|--------|------|:---:|:---:|
+| G1 | always_max_cycle_moe | 26.70s | 2.63x |
+| G2 | XB direction-aware | 21.14s | 3.29x |
+| G3 | stride K=2 | 30.81s | 2.28x |
+| G4 | stride K=3 | 30.73s | 2.28x |
+| G5 | cooperative r=2 | 21.09s | 3.33x |
+| G6 | cooperative r=4 | 21.15s | 3.32x |
+| G7 | reuse_dist 50ms + XB | 21.16s | 3.32x |
+| G8 | reuse_dist 20ms + XB | 21.04s | 3.33x |
 
-TODO — 待测试完成后填写。
+#### llama.cpp 120B 结果
+
+| Config | 策略 | pp (tok/s) | tg (tok/s) |
+|--------|------|:---:|:---:|
+| L1 | always_max_cycle_moe | 230.96 | 91.97 |
+| L2 | cooperative r=2 | 216.86 | 74.32 |
+| L3 | reuse_dist 50ms (no XB) | 230.26 | 91.64 |
+| L4 | reuse_dist 20ms (no XB) | 229.56 | 91.29 |
+| L5 | throttled_xb 1ms/50 | 215.79 | 73.57 |
+| L6 | throttled_xb 5ms/20 | 225.89 | 82.37 |
+
+### 8.11 分析与结论
+
+#### GNN 10M (1.34x oversub)
+
+- **XB direction (G2, 21.14s) 和 cooperative/reuse_dist+XB (G5-G8, 21.0-21.2s) 性能几乎一致**，均 ~3.3x 加速
+- **stride multi-block (G3/G4, ~30.8s) 严重退化** — 即使 K=2 也不如 always_max (26.7s)，说明 multi-block 预取的 PCIe 开销 > 收益
+- **eviction 策略差异极小**: cooperative 和 reuse_dist 都提供 XB，真正起作用的是 cross-block 本身（方向检测 + 1-block 前瞻），而非 eviction 改进
+- **GNN 最优**: 任何含 direction-aware 1-block XB 的策略 ≈ 21s (3.3x)
+
+#### llama.cpp 120B (1.84x oversub)
+
+- **always_max_cycle_moe (L1) 仍是最优**: pp=231, tg=92
+- **所有 XB 策略均有害**: cooperative (L2, tg -19%), throttled_xb (L5 -20%, L6 -10%) — 1.84x oversub 下 PCIe 完全饱和，XB 是零和
+- **reuse_dist eviction (L3/L4) ≈ cycle_moe**: 50ms 和 20ms 阈值无差异，tg=91.3-91.6 ≈ L1 的 92.0，说明 eviction 策略在高 oversub 下差异可忽略
+- **throttled_xb 参数敏感**: L6 (5ms/20) 比 L5 (1ms/50) 好 +12% tg，但仍不如 no-XB
+
+#### 跨 workload 结论
+
+1. **Cross-block 效果完全取决于 oversub ratio**: GNN 1.34x → +26% (XB 有效); llama 1.84x → -10~20% (XB 有害)
+2. **Eviction 策略差异极小**: reuse_dist ≈ cycle_moe ≈ always_max，在 1.34x 和 1.84x 下均成立。Belady 近似的理论优势在实际 workload 中未体现
+3. **Cooperative prefetch-eviction 未兑现承诺**: 在 GNN 上 ≈ XB direction（eviction 保护无额外价值），在 llama 上有害（XB 本身有害）
+4. **Stride multi-block 方向失败**: 即使保守的 K=2 也不如 1-block XB，根本原因是 multi-block 预取触发过多 DMA
+5. **最佳策略**: GNN → XB direction-aware; llama → always_max_cycle_moe (no XB); 通用 → always_max + 按 oversub 选择是否开 XB
 

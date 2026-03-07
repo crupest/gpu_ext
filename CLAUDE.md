@@ -75,6 +75,35 @@ Always run `python workloads/cleanup_gpu.py` before benchmarks to kill stale GPU
 - DO commit `pyproject.toml` and `uv.lock` for every workload.
 - **DO commit benchmark result JSON files** (`results/*.json`, `result/*.json`). They are small (4K each) and serve as experiment records. Always include them when committing after running experiments.
 
+### Codex CLI as Subagent
+
+OpenAI Codex CLI is available on this machine (`codex-cli 0.111.0`, model `gpt-5.4`). Use it for **independent code-writing tasks**.
+
+```bash
+# Non-interactive execution — no sandbox, no prompts
+codex exec --dangerously-bypass-approvals-and-sandbox "your prompt here"
+
+# With a specific working directory
+codex exec --dangerously-bypass-approvals-and-sandbox -C /path/to/dir "your prompt here"
+```
+
+**When to use Codex / subagent (Agent tool)**:
+- Complex, independent coding tasks (implement a new BPF program, modify a benchmark, etc.)
+- Tasks that don't need intermediate decisions from the main conversation
+- Parallelizable work: multiple subagents can write code simultaneously (but experiments must still run serially)
+
+**When NOT to use**:
+- Tasks requiring GPU/BPF execution (need sudo, struct_ops singleton)
+- Tasks requiring interactive decisions or context from the main conversation
+
+### Task Delegation Principles
+
+- **Complex independent tasks → subagent or codex**. Don't do everything in the main conversation.
+- **Research/investigation → Agent tool** (subagent_type=Explore or general-purpose)
+- **Code writing → codex exec** or Agent tool (general-purpose)
+- **Experiments → Agent tool** (must be serial, one at a time)
+- **Always give subagents/codex complete context**: file paths, function signatures, constraints, expected output format.
+
 ### Paper Reproduction
 
 All experiments must match the paper's configuration (models, dataset sizes, number of trials). Software versions use whatever is locally installed/built from source — do not pin to specific versions.
