@@ -51,6 +51,8 @@ extension/gpu_preempt_ctrl
 extension/gpu_sched_set_timeslices
 extension/gpu_sched_trace
 extension/prefetch_*
+!extension/prefetch_*.c
+!extension/prefetch_*.bpf.c
 extension/sched_gpu_*
 extension/struct_ops
 extension/test_*

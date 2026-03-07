@@ -32,7 +32,8 @@ static inline int cleanup_old_struct_ops(void) {
             if (errno == ENOENT) {
                 break; /* No more maps */
             }
-            continue;
+            fprintf(stderr, "Skipping struct_ops cleanup scan: %s\n", strerror(errno));
+            break;
         }
 
         fd = bpf_map_get_fd_by_id(map_id);
