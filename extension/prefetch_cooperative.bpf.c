@@ -314,15 +314,6 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-	return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
 	/* 1) Cooperative protection: check if chunk is near a prefetch target */
 	uvm_va_block_t *va_block = BPF_CORE_READ(chunk, va_block);
 	if (va_block) {
@@ -367,6 +358,15 @@ int BPF_PROG(gpu_block_access,
 	}
 
 	return 0; /* DEFAULT: kernel LRU */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+	return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

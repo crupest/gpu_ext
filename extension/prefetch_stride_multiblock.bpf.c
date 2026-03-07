@@ -369,15 +369,6 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-    return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
     /* cycle_moe: T1 protect + DEFAULT for non-T1 (kernel LRU refresh) */
     u32 idx = chunk_hash(chunk);
     u8 *count = bpf_map_lookup_elem(&access_counts, &idx);
@@ -395,6 +386,15 @@ int BPF_PROG(gpu_block_access,
     }
 
     /* Non-T1: DEFAULT, let kernel LRU refresh */
+    return 0;
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
     return 0;
 }
 

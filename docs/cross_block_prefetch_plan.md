@@ -1592,3 +1592,218 @@ sudo python3 workloads/cleanup_gpu.py
 3. **Hook 目标选择困难**: vLLM 的 attention backend 随版本变化，静态 hook 不可靠
 4. **BPF struct_ops 进程上下文陷阱**: struct_ops 和 kprobe 在 UVM 内核线程上下文运行，`bpf_get_current_pid_tgid()` 不返回应用 PID — 这是一个重要的设计约束，任何需要进程感知的 BPF 策略都必须通过其他机制（如 uprobe 提前设置 map flag）来传递进程信息
 
+## 9. 与论文原始数据对比 (2026-03-06)
+
+### 9.1 论文原始数据（Paper Baselines）
+
+论文中各 workload 的 UVM baseline 性能（无 BPF 策略，stock nvidia-uvm 驱动）：
+
+| Workload | 指标 | Paper UVM Baseline |
+|----------|------|:--:|
+| llama.cpp 120B | pp512 (tok/s) | 238.48 |
+| llama.cpp 120B | tg128 (tok/s) | 7.72 |
+| GNN 10M (1.43x) | epoch (s) | 70.06 |
+| GNN 15M (2.17x) | epoch (s) | 292.77 |
+| FAISS SIFT100M | add (s) | 68.41 |
+| FAISS SIFT100M | search np=1 (s) | 5.14 |
+| FAISS SIFT100M | search np=16 (s) | 56.51 |
+| vLLM 30B | TPOT (ms) | 374.23 |
+| vLLM 30B | throughput (tok/s) | 307.26 |
+
+论文中 ncmoe (CPU offload) 参考值：
+- ncmoe=64: pp=245.63, tg=16.34
+- ncmoe=32: pp=260.14, tg=18.18
+
+### 9.2 BPF 策略最佳结果 vs 论文 Baseline
+
+| Workload | 指标 | Paper Baseline | 最佳 BPF 结果 | 最佳策略 | 改进幅度 |
+|----------|------|:-:|:-:|------|:-:|
+| **llama.cpp 120B** | pp512 (tok/s) | 238.48 | **230.96** | always_max+cycle_moe | ≈ (pp 受限于模型结构) |
+| **llama.cpp 120B** | tg128 (tok/s) | 7.72 | **91.97** | always_max+cycle_moe | **+1091% (11.9x)** |
+| **GNN 10M** | epoch (s) | 70.06 | **21.15** | XB direction-aware | **-69.8% (3.32x)** |
+| **FAISS SIFT100M** | add (s) | 68.41 | **47.31** | phase v2+default_lru (§7.5 D3) | **-30.8%** |
+| **FAISS SIFT100M** | search np=1 (s) | 5.14 | **4.38** | always_max (§7.5 B) | **-14.8%** |
+| **FAISS SIFT100M** | search np=16 (s) | 56.51 | **49.45** | always_max (§7.5 B) | **-12.5%** |
+| **vLLM 30B** | TPOT (ms) | — | N/A | — | 测试配置不同 |
+| **vLLM 30B** | throughput (tok/s) | — | N/A | — | 测试配置不同 |
+
+> **注1**: FAISS 的 add 和 search 最优策略不同 — add 最优是 phase v2+default_lru (§7.5 D3)，search 最优是 always_max (§7.5 B)。cycle_moe eviction 会伤害 search np=1 (9.78s vs 5.49s, §7.5 D2 vs D3)。
+>
+> **注2**: vLLM 的 paper baseline 用 100 concurrent requests（高并发 CPU offload 模式），我们的实验用 rate=5 ShareGPT（serving 模式），**不可直接比较**。vLLM vs 自身 UVM baseline: TPOT 60.9→55.1ms (**-9.5%**), throughput 233.8→256.8 (**+9.8%**)，来源 §7.8 Config C。
+
+### 9.3 vs 论文 ncmoe (CPU Offload) 对比
+
+llama.cpp 120B 的论文 ncmoe 方案是基于 `--override-kv` 参数手动将 expert 权重放到 CPU，GPU 通过 PCIe 按需加载：
+
+| 方案 | pp512 | tg128 | vs ncmoe=32 |
+|------|:---:|:---:|:---:|
+| ncmoe=64 (paper) | 245.63 | 16.34 | — |
+| ncmoe=32 (paper) | 260.14 | 18.18 | 1.0x |
+| UVM baseline (paper) | 238.48 | 7.72 | tg 0.42x |
+| **BPF always_max+cycle_moe** | **230.96** | **91.97** | **tg 5.06x** |
+
+**结论**: BPF always_max 让 UVM 的 tg 从 7.72 提升到 91.97 — **decode 吞吐比论文最佳 ncmoe=32 (18.18) 快 5.06x**。但 pp512 (230.96) 低于 ncmoe=32 (260.14)，因为 prefill 阶段 ncmoe 的 CPU offload 减少了 GPU 内存压力。**UVM+BPF 在 decode (tg) 上显著超越 ncmoe，prefill (pp) 上略逊。**
+
+### 9.4 各算法改进贡献分析
+
+#### 有效算法（产生了实际改进）
+
+| 算法 | 类型 | 关键机制 | 生效 Workload | 实际改进 |
+|------|------|----------|--------------|----------|
+| **always_max** | Prefetch | 每次 fault 预取整个 2MB VA block | 全部 | llama tg +1091%, GNN 2.6x, FAISS -31% |
+| **cycle_moe** | Eviction | 频繁访问的 chunk (T1) 不被驱逐 | llama.cpp | tg +~5% vs paper BPF (§9.7, 含运行间方差) |
+| **XB direction-aware** | Cross-block | 检测 VA 方向，预取相邻 block | GNN | 在 always_max 基础上再 +21% (21.32 vs 26.99, §7.1) |
+| **phase-adaptive** | Phase | 自动检测 build/search 切换 XB | FAISS | 接近 always_max，search 接近零额外开销 |
+
+#### 无效/有害算法
+
+| 算法 | 原因 | 数据 |
+|------|------|------|
+| stride multi-block (K>1) | PCIe 过载 | GNN -46% (§7.10) |
+| cooperative eviction | 保护逻辑无额外价值 | GNN ≈ XB, llama -19% (§8.10) |
+| reuse_dist eviction | ≈ cycle_moe | 无差异 (§8.10) |
+| throttled_xb | fault rate 不是好指标 | llama -20% (§8.10) |
+| phase-adaptive decode size | 缩小预取丢失 batch efficiency | llama -23~58% (§7.15) |
+| proactive uprobe | 16MB vs 10GB ≈ 0.15% | GNN ≈ XB dir (§8.12) |
+| XB (高 oversub) | PCIe 零和博弈 | llama -10~20% (§5) |
+
+### 9.5 核心改进算法总结
+
+**真正产生改进的只有 2 个核心算法**：
+
+1. **always_max intra-block prefetch** — 将 NVIDIA 默认的保守 bitmap-tree prefetch (threshold=51) 替换为"每次 fault 预取整个 2MB VA block"。这是**最大的单一改进**，覆盖所有 workload。
+   - 实现: `gpu_page_prefetch()` 直接返回 `max_prefetch_region`
+   - 本质: 绕过了 NVIDIA 的 `uvm_perf_prefetch_threshold` 参数（默认 51，过于保守）
+   - 等价于: `modprobe nvidia_uvm uvm_perf_prefetch_threshold=1`（但 BPF 可运行时加载，无需重启模块）
+
+2. **direction-aware cross-block prefetch** — 在 always_max 基础上，检测 VA 访问方向，异步预取相邻 2MB block。**仅在低 oversub 场景（<1.5x）有效**。
+   - 实现: 3-point direction history + `bpf_wq` + `bpf_gpu_migrate_range()`
+   - 生效场景: GNN sequential scan (1.43x) → +26%
+   - 无效场景: llama.cpp (1.84x) → -10~20%（PCIe 饱和，零和博弈）
+
+**辅助算法**（小幅改进或工程价值）：
+- **cycle_moe eviction**: T1 保护，llama tg +~5% vs paper BPF（含运行间方差），防止 attention weights 被驱逐
+- **phase detection**: FAISS build/search 切换，工程价值（避免 search 阶段做无用 XB）
+
+### 9.6 系统设计启示
+
+1. **简单策略最有效**: 最大改进来自 always_max（一行代码），而非复杂的 multi-block、cooperative、reuse-distance 等算法
+2. **Oversub ratio 决定一切**: <1.5x → XB 有效; >1.5x → XB 有害。没有通用最优策略
+3. **BPF 可编程性的价值**: 不是因为策略复杂，而是因为**运行时可切换** — stock driver 的 threshold 参数在 modprobe 时固定，BPF 可以动态加载/卸载
+4. **NVIDIA 默认参数过于保守**: threshold=51 导致 57-70% 性能损失，BPF always_max (≈threshold=1) 是最简单的修复
+
+### 9.7 vs 论文最佳 BPF 算法（gpu_ext: `prefetch_adaptive_sequential`，llama.cpp 额外加载 `eviction_lfu`）
+
+论文自身的 BPF 算法结果（来自 `workloads/README.md`，GNN/FAISS 仅加载 prefetch，llama.cpp 同时加载 prefetch+eviction）：
+
+| 工作负载 | 论文 gpu_ext BPF | 我们的最佳结果 | 改进 | 差异来源 |
+|----------|-----------------|---------------|------|---------|
+| llama.cpp pp | 229.67 tok/s | 230.96 tok/s | +0.6% | 基本持平 |
+| llama.cpp tg | 86.89 tok/s | 91.97 tok/s | **+5.8%** | cycle_moe 替代 eviction_lfu |
+| GNN 10M | 26.47s (2.65x) | 21.15s (3.32x) | **-20.1% (快 25.2%)** | XB direction-aware 新算法 |
+| FAISS add | ~21-29% reduction | -31.8% (47.31s) | 略优 | phase detection 精准切换 |
+| vLLM | TPOT=235.68ms | TPOT=55.1ms | N/A | 测试配置不同，不可直接比较 |
+
+**关键发现**：
+
+1. **GNN 是唯一显著超越论文 BPF 的工作负载** — XB direction-aware cross-block prefetch 比论文的 stride prefetch 快 25.2%。这是本轮实验唯一的真正新算法贡献。
+2. **llama.cpp 改进边际** — +5.8% 来自 cycle_moe eviction（T1 attention weights 保护），但 PCIe 带宽是硬瓶颈，进一步提升空间极小。
+3. **FAISS 基本持平** — phase detection 的价值在于精准切换 prefetch/eviction 策略，但 always_max 单一策略已经足够好。
+4. **论文的 `prefetch_adaptive_sequential` ≈ 我们的 `always_max`** — 两者本质相同（full VA block prefetch on every fault），差异仅在实现路径。
+
+**结论**：相比论文自身 BPF 算法，新增贡献集中在：
+- **XB direction-aware**（GNN +25%，唯一大幅改进）
+- **cycle_moe eviction**（llama +5.8%，边际改进）
+- 其余算法（proactive layer、cooperative、reuse-distance、multi-block stride）均未能超越论文 baseline
+
+## 10. 论文大幅改进路线：从 Fault-Driven 到 Semantic-Driven UVM (2026-03-06)
+
+### 10.1 核心诊断：Fault-Driven Heuristic 已到天花板
+
+**证据链**：
+- 15+ 个 fault-driven 启发式算法（cooperative, reuse-distance, multi-block stride, phase-adaptive decode, proactive layer, throttled XB...）全部未能超越 always_max baseline
+- always_max 本质只是一行代码：`bpf_gpu_set_prefetch_region(result_region, max_first, max_outer)`
+- llama.cpp 的理论上限 ~167 tok/s（PCIe DMA 6.6ms/tok = 59% 时间），当前 91.97 tok/s，差距来自 **fault latency + 串行 DMA**，不是启发式不够好
+- 唯一出现量级跃迁的是 uprobe 直接迁移 microbench：always_max 2009ms → uprobe 788ms (**2.5x 更快**)
+
+**根本原因**：fault-driven 策略在 GPU **已经 stall** 之后才触发预取。无论启发式多聪明，都无法消除 fault latency 本身。真正的突破必须是 **在 fault 之前** 就开始迁移。
+
+### 10.2 改进方向一：MoE Expert Proactive Prefetch（llama.cpp / vLLM）
+
+**核心思想**：MoE 模型中，router/gate 在 GPU 上计算完成后，CPU 侧可以通过 uprobe 拦截 expert dispatch 函数，得知即将访问哪些 expert weights。在 GPU compute 当前 expert 的同时，BPF 通过 `bpf_gpu_migrate_range()` 提前搬运下一个 expert。
+
+**为什么原来做不了**：
+- `gpu_page_prefetch` hook 不传 va_block/va_space/PID，无法确定 "哪个进程的哪块内存"
+- struct_ops 在 UVM 内核线程上下文运行，`bpf_get_current_pid_tgid()` 不返回应用 PID
+- 原生 prefetch 限制在当前 2MB VA block 内，无法跨 block 迁移任意地址
+- **解决方案**：uprobe 在应用上下文拦截 expert dispatch → 写入 BPF map → struct_ops 的 bpf_wq 消费 map 并调用 `bpf_gpu_migrate_range()`
+
+**预期改进**：
+- 当前 llama.cpp 120B decode: 91.97 tok/s (PCIe DMA 串行)
+- 理论上限: ~167 tok/s (DMA 与 compute 完全重叠)
+- 目标: 通过 expert-level pipeline prefetch, DMA-compute overlap 提升至 **120-140 tok/s (+30-50%)**
+- 每个 expert ~1.6GB (120B model, 128 experts)，top-2 routing → 每 token 需要 2 个 expert
+- 如果在 expert 0 compute 时能搬完 expert 1 → 消除一半 fault latency
+
+**实现计划**：
+1. 分析 llama.cpp MoE 代码路径，找到 router 结果可用的 CPU 侧函数
+2. 确定 expert weights 的 VA 布局（每个 expert 的地址范围）
+3. 实现 uprobe hook：拦截 expert dispatch，提取 expert ID，计算 VA range
+4. 实现 BPF 策略：uprobe → pending_map → struct_ops bpf_wq → migrate_range
+5. 基准测试：vs always_max baseline，看 DMA-compute overlap 效果
+
+**状态**: 🔄 探索中
+
+### 10.3 改进方向二：GNN Batch-Level Proactive Migration
+
+**核心思想**：GNN 训练中，mini-batch sampler 在 CPU 上生成下一批节点的 feature 索引。在 GPU 处理 batch N 时，BPF 根据 batch N+1 的节点列表，提前迁移对应的 feature tensor 片段。
+
+**为什么原来做不了**：
+- proactive layer migration（§7.9）只搬 epoch 开头的 16MB，相对于 10.24GB 总量 ≈ 0.15%
+- uprobe 挂 `cudaDeviceSynchronize` 只是 epoch 边界，粒度太粗
+- 需要的是 **batch 级别** 的语义：知道下一批要访问 feature tensor 的哪些 rows
+
+**预期改进**：
+- GNN 15M 当前 168.73s (gpu_ext BPF) vs 150.11s (应用 cudaMemPrefetchAsync + BPF)
+- 说明应用级 prefetch 还能额外砍 18.6s → BPF 如果能模拟应用 prefetch 语义，可以接近 150s
+- GNN 10M: 当前 21.15s (XB direction)，如果 batch-level proactive 能替代 XB 的方向猜测，可能更稳定
+- **关键**：需要找到 PyTorch GNN dataloader 中暴露 batch 节点列表的函数
+
+**状态**: ⏳ 待探索
+
+### 10.4 改进方向三：扩展 BPF Struct_Ops 接口
+
+**核心思想**：当前接口限制是很多算法失败的 **根本原因**（不全是算法问题）。新增接口 + 用真实 workload 实验证明 "为什么需要这个接口"。
+
+#### 10.4.1 接口改进清单
+
+| 新接口 | 类型 | 解决什么问题 | 用哪个 workload 证明 |
+|--------|------|-------------|---------------------|
+| `gpu_page_prefetch` 传 va_block/va_space/PID | hook 扩展 | 消除 kprobe side channel hack | 所有 XB 策略简化 |
+| sleepable 原生跨块 prefetch hook | 新 hook | 消除 bpf_wq 延迟（当前 wq 调度 ~100us） | GNN XB 进一步加速 |
+| `bpf_gpu_get_pmm_stats()` | 新 kfunc | pressure-aware 决策 | FAISS phase 切换精度 |
+| `bpf_gpu_get_copy_engine_backlog()` | 新 kfunc | bandwidth-aware rate limiting | llama XB 避免 PCIe 过载 |
+| `bpf_gpu_block_insert_after()` | 新 kfunc | 严格有序 eviction (LFU/Belady) | llama eviction 改进 |
+| `gpu_migrate_complete` 回调 | 新 hook | 迁移完成通知，用于 pipeline 控制 | MoE expert prefetch |
+| `gpu_fault_batch_begin/end` | 新 hook | 批量 fault 语义 | 所有 workload 减少 per-fault overhead |
+
+#### 10.4.2 论文叙事
+
+每个新接口的论文结构：
+1. **Motivation**: 用现有代码展示 workaround 的复杂性和局限性
+2. **Interface Design**: 新 hook/kfunc 的签名和语义
+3. **Implementation**: 内核模块改动（行数、复杂度）
+4. **Evaluation**: A/B 实验 — 同一算法，旧接口 vs 新接口的性能/代码简洁度对比
+5. **Case Study**: 新接口 enable 了哪个之前做不到的策略
+
+**状态**: ⏳ 待排优先级（先做 MoE expert prefetch，用它来驱动接口需求）
+
+### 10.5 改进优先级
+
+| 优先级 | 方向 | 预期改进 | 工作量 | 论文价值 |
+|--------|------|---------|--------|---------|
+| **P0** | MoE Expert Prefetch (llama.cpp) | +30-50% tg | 1-2 周 | 最高 — 新机制 + 大幅改进 |
+| P1 | GNN Batch Proactive | GNN 15M 接近应用 prefetch | 1 周 | 高 — 证明 BPF 可替代应用修改 |
+| P2 | 接口扩展 + 实验证明 | 各 workload 5-25% | 2-3 周 | 高 — 系统贡献 |
+| P3 | vLLM KV-cache aware | TPOT -10-15% | 1 周 | 中 — 增量改进 |
+

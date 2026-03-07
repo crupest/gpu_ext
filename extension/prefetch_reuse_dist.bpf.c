@@ -292,15 +292,6 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-	return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
 	u32 h = chunk_hash(chunk);
 	u64 now = bpf_ktime_get_ns();
 
@@ -330,6 +321,15 @@ int BPF_PROG(gpu_block_access,
 
 	stat_inc(STAT_RD_EXPOSE);
 	return 0; /* DEFAULT: kernel LRU */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+	return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

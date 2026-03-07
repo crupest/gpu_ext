@@ -273,7 +273,7 @@ int BPF_PROG(gpu_block_activate,
 
     /* Check if this chunk was already tracked (avoid double counting) */
     if (bpf_map_lookup_elem(&active_chunks, &chunk_ptr))
-        return 0;
+        goto do_eviction;
 
     /* Track this chunk as active */
     bpf_map_update_elem(&active_chunks, &chunk_ptr, &owner_pid, BPF_ANY);
@@ -289,25 +289,10 @@ int BPF_PROG(gpu_block_activate,
         bpf_map_update_elem(&pid_stats, &owner_pid, &new_stats, BPF_ANY);
     }
 
-    return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
-    u32 owner_pid;
+do_eviction:
+    ;
+    /* PID-based eviction logic (moved from gpu_block_access) */
     u64 decay_factor;
-    struct pid_chunk_stats *stats;
-    u64 chunk_ptr = (u64)chunk;
-    u64 *access_count;
-    u64 count;
-
-    owner_pid = get_owner_pid_from_chunk(chunk);
-    if (owner_pid == 0)
-        return 0;
 
     /* Get per-PID stats */
     stats = bpf_map_lookup_elem(&pid_stats, &owner_pid);
@@ -321,7 +306,8 @@ int BPF_PROG(gpu_block_access,
     decay_factor = get_eviction_decay_for_pid(owner_pid);
 
     /* Get and increment access count for this chunk */
-    access_count = bpf_map_lookup_elem(&chunk_access_count, &chunk_ptr);
+    u64 *access_count = bpf_map_lookup_elem(&chunk_access_count, &chunk_ptr);
+    u64 count;
     if (access_count) {
         count = __sync_fetch_and_add(access_count, 1) + 1;
     } else {
@@ -346,6 +332,15 @@ int BPF_PROG(gpu_block_access,
     }
 
     return 1; /* BYPASS - don't let kernel do LRU move */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+    return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

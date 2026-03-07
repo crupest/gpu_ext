@@ -73,15 +73,6 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-    return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
     u32 idx = chunk_hash(chunk);
     u8 *count;
 
@@ -104,6 +95,15 @@ int BPF_PROG(gpu_block_access,
      * The chunk stays at its current list position, naturally drifting
      * toward HEAD as newer chunks are added at TAIL. */
     return 1; /* BYPASS, no move = passive MRU */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+    return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

@@ -330,13 +330,12 @@ int BPF_PROG(gpu_block_activate,
      * PRIMARY ACTUATOR: QoS eviction bias via LRU position at activate time.
      *
      * chunk_activate fires on EVERY page fault (verified: activate=1.8M).
-     * gpu_block_access (chunk_used) does NOT fire for resident pages.
      *
      * When eviction_bias > 0:
      *   LC chunk → move_tail (MRU = last to evict = protected)
      *   BE chunk → move_head (LRU = first to evict = penalized)
      * When eviction_bias == 0:
-     *   return 0 → kernel default (move_tail for all)
+     *   fall through to cycle_moe T1 check below
      */
     if (eviction_bias > 0 && owner_pid) {
         if (is_lc_process(owner_pid)) {
@@ -350,26 +349,7 @@ int BPF_PROG(gpu_block_activate,
         }
     }
 
-    return 0; /* default: kernel moves to tail */
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
-    stat_inc(STAT_USED);
-
-    u32 owner_pid = get_owner_pid_from_chunk(chunk);
-
-    /* xCoord: track worker + update used count */
-    if (owner_pid) {
-        update_gpu_state_used(owner_pid);
-        track_uvm_worker();
-    }
-
-    /* cycle_moe: T1 frequency-based protection */
+    /* cycle_moe: T1 frequency-based protection (moved from gpu_block_access) */
     u32 idx = chunk_hash(chunk);
     u8 *count = bpf_map_lookup_elem(&access_counts, &idx);
     if (count) {
@@ -384,7 +364,16 @@ int BPF_PROG(gpu_block_access,
         }
     }
 
-    return 0; /* kernel default for non-T1 */
+    return 0; /* default: kernel moves to tail */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+    return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

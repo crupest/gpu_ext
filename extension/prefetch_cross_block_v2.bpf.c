@@ -389,15 +389,6 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-    return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
     /* Read eviction mode from config */
     u32 cfg_key = 0;
     u64 *mode = bpf_map_lookup_elem(&xb_config, &cfg_key);
@@ -434,6 +425,15 @@ int BPF_PROG(gpu_block_access,
         return 1;
 
     /* Mode 1 (cycle_moe): DEFAULT, let kernel LRU refresh non-T1 */
+    return 0;
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
     return 0;
 }
 

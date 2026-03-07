@@ -177,9 +177,7 @@ int BPF_PROG(gpu_block_activate,
              uvm_gpu_chunk_t *chunk,
              struct list_head *list)
 {
-    /* Update runtime state: track fault VA for layer detection.
-     * Use only hash map fast path here — the full boundary search
-     * is reserved for chunk_used to stay within BPF jump limits. */
+    /* Update runtime state: track fault VA for layer detection. */
     uvm_va_block_t *va_block = BPF_CORE_READ(chunk, va_block);
     if (!va_block)
         return 0;
@@ -208,18 +206,8 @@ int BPF_PROG(gpu_block_activate,
     if (layer_id)
         st->current_layer = *layer_id;
 
-    return 0; /* Let kernel handle activation (safe — no move_head) */
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
+    /* T1 frequency check (moved from gpu_block_access) */
     u32 idx = chunk_hash(chunk);
-
-    /* T1 frequency check */
     u8 *count = bpf_map_lookup_elem(&access_counts, &idx);
     if (!count)
         return 0;
@@ -235,17 +223,8 @@ int BPF_PROG(gpu_block_access,
     }
 
     /* Non-T1: use Belady distance for eviction ordering */
-    uvm_va_block_t *va_block = BPF_CORE_READ(chunk, va_block);
-    if (!va_block)
-        return 1; /* BYPASS, no move = passive MRU fallback */
-    u64 chunk_va = BPF_CORE_READ(va_block, start);
-    if (chunk_va == 0)
-        return 1;
-
-    u32 zero = 0;
-    struct runtime_state *st = bpf_map_lookup_elem(&state_map, &zero);
     struct config *cfg = bpf_map_lookup_elem(&config_map, &zero);
-    if (!st || !cfg)
+    if (!cfg)
         return 1;
 
     u32 chunk_layer = va_to_layer(chunk_va, cfg->num_layers);
@@ -267,6 +246,15 @@ int BPF_PROG(gpu_block_access,
     /* Middle distance: no move (passive ordering) */
 
     return 1; /* BYPASS */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+    return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")

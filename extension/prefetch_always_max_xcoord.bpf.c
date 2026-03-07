@@ -149,29 +149,13 @@ int BPF_PROG(gpu_block_activate,
     u32 owner_pid = get_owner_pid_from_chunk(chunk);
     if (owner_pid) {
         update_gpu_state_fault(owner_pid);
-        track_uvm_worker();
-    }
-    return 0;
-}
-
-SEC("struct_ops/gpu_block_access")
-int BPF_PROG(gpu_block_access,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             struct list_head *list)
-{
-    u32 idx = chunk_hash(chunk);
-    u8 *count;
-
-    /* xCoord: track worker + update used count */
-    u32 owner_pid = get_owner_pid_from_chunk(chunk);
-    if (owner_pid) {
         update_gpu_state_used(owner_pid);
         track_uvm_worker();
     }
 
     /* cycle_moe: T1 frequency-based protection */
-    count = bpf_map_lookup_elem(&access_counts, &idx);
+    u32 idx = chunk_hash(chunk);
+    u8 *count = bpf_map_lookup_elem(&access_counts, &idx);
     if (count) {
         u8 c = *count;
         if (c < 255)
@@ -184,6 +168,15 @@ int BPF_PROG(gpu_block_access,
     }
 
     return 0; /* kernel default for non-T1 */
+}
+
+SEC("struct_ops/gpu_block_access")
+int BPF_PROG(gpu_block_access,
+             uvm_pmm_gpu_t *pmm,
+             uvm_gpu_chunk_t *chunk,
+             struct list_head *list)
+{
+    return 0;
 }
 
 SEC("struct_ops/gpu_evict_prepare")
