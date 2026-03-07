@@ -87,7 +87,24 @@ SIFT100M, IVF4096,Flat, 1.5x oversub
 
 ---
 
-## P5 vLLM 重测（低优先级，待执行）
+## P5 vLLM 重测 ✅ (2026-03-07)
+
+Qwen-30B FP8 MoE, 100 prompts, ShareGPT, request_rate=5, 1.175x oversub
+
+| 配置 | TPOT (ms) | Throughput (tok/s) | Mean TTFT (ms) | P99 TTFT (ms) |
+|------|:---------:|:------------------:|:--------------:|:-------------:|
+| **V1** cpu_offload (8GB) | 228.9 | 365.3 | 1,174 | 2,862 |
+| **V2** UVM baseline (no BPF) | 61.3 | 231.9 | 77,013 | 173,795 |
+| **V3** always_max + cycle_moe (fixed) | 55.8 | 255.4 | 66,964 | 153,623 |
+| 之前 always_max + cycle_moe (修复前) | 55.1 | 256.8 | 66,985 | 151,560 |
+
+### P5 结论
+1. **V3 vs V2 (UVM baseline)**: TPOT -9.0% (55.8 vs 61.3), throughput +10.1% (255.4 vs 231.9) — 与修复前一致
+2. **V3 vs V1 (cpu_offload)**: TPOT 4.1x better (55.8 vs 228.9), throughput 0.70x (255.4 vs 365.3)
+3. **TTFT 不可比**: UVM 模式用 `--max-num-seqs 16`（100 prompts 排队），cpu_offload 无此限制
+4. **cycle_moe 修复前后无差异**: 55.8ms vs 55.1ms（在 1.175x 低 oversub 下 eviction policy 无影响）
+5. **论文 claim "1.3x throughput vs cpu-offload" 不成立**: 当前 0.70x，因为 cpu_offload 可以 100 并发而 UVM 限制 16 并发
+6. **论文 claim "TTFT 1.7-2x" 不可比**: 并发数不同导致 TTFT 差距 57x，不是 policy 效果
 
 ---
 
@@ -125,3 +142,76 @@ SIFT100M, IVF4096,Flat, 1.5x oversub
 - **方向 2**: 降低 oversub ratio — <1.5x 时 PCIe 未饱和，bitmap replay 可能有正收益
 - **方向 3**: 预测性 prefetch — 不是 replay 上一个 token，而是预测下一个 token 的 expert
 - **方向 4**: 在 GNN/FAISS（低 oversub）上测试 bitmap replay
+
+---
+
+## 与论文最佳结果对比 (2026-03-07)
+
+论文: `docs/gpu-ext/paper/tex/eval.tex`
+论文使用 stride prefetch + LFU eviction（旧驱动），当前使用 always_max + cycle_moe（驱动 575.57.08）。
+
+### llama.cpp 120B (1.84x oversub)
+
+| 配置 | pp512 (tok/s) | tg128 (tok/s) | 来源 |
+|------|:---:|:---:|------|
+| ncmoe=32 (framework offload) | 260.14 | 18.18 | 论文 baseline |
+| ncmoe=64 (framework offload) | 245.63 | 16.34 | 论文 baseline |
+| **论文: UVM + eBPF (stride+LFU)** | **229.67** | **86.89** | 论文最佳 |
+| **当前: always_max + cycle_moe (fixed)** | **218.80** | **86.76** | 修复后 10-run |
+
+- **tg 匹配论文**: 86.76 vs 86.89 (-0.15%)
+- **pp 略低**: 218.80 vs 229.67 (-4.7%)，可能来自驱动版本差异
+- **论文 4.8x claim 成立**: 86.76 / 18.18 = 4.77x vs framework offloading
+
+### GNN (GCN 10M nodes, 1.34x oversub)
+
+| 配置 | epoch (s) | speedup | 来源 |
+|------|:---:|:---:|------|
+| No BPF baseline | 70.42 | 1.000x | 当前 |
+| **论文: eBPF prefetch** | ~26.5 | **2.65x** | 论文 |
+| 当前: always_max + cycle_moe | 26.59 | **2.648x** | 修复后 |
+| **当前: XB direction + cycle_moe** | **20.98** | **3.356x** | **超越论文 +27%** |
+
+- always_max 匹配论文 (2.648x ≈ 2.65x)
+- **XB direction 超越论文 +27%** — 论文未包含 cross-block prefetch
+
+### FAISS SIFT100M (1.5x oversub)
+
+| 指标 | 论文 claim | 当前 (always_max + cycle_moe) | 对比 |
+|------|-----------|------------------------------|------|
+| **build time** | -21~29% | **-32.1%** (47.7s vs 70.2s) | **超越论文** |
+| **search np=1** | -10~16% | **-30.4%** (5.98s vs 8.59s) | **远超论文** |
+| search np=4 | -10~16% | -10.3% (13.02s vs 14.52s) | 匹配 |
+| search np=16 | -10~16% | -9.1% (51.36s vs 56.53s) | 接近下界 |
+
+- **Build 超越论文上界**: -32.1% > -29%
+- **Search np=1 大幅超越**: -30.4% vs 论文 -16%
+- **关键原因**: 论文时 cycle_moe 是 dead code，FAISS 结果实际无 eviction policy。修复后 T1 保护生效，防止 always_max 挤占热搜索数据
+
+### vLLM Qwen-30B (1.175x oversub)
+
+| 指标 | 论文 claim | 当前结果 | 对比 |
+|------|-----------|---------|------|
+| TPOT | — | 55.8ms vs cpu_offload 228.9ms | **4.1x better** |
+| throughput | 1.3x vs cpu-offload | 255.4 vs 365.3 (0.70x) | **不成立** |
+| TTFT | 1.7-2x vs cpu-offload | 66,964 vs 1,174 (57x worse) | **不可比** |
+| vs UVM baseline | — | TPOT -9.0%, throughput +10.1% | BPF 有效 |
+
+- **throughput 0.70x**: UVM 模式限制 `--max-num-seqs 16` (内存受限)，cpu_offload 可 100 并发
+- **TTFT 不可比**: 并发限制不同，TTFT 差距来自排队，非 policy 效果
+- **TPOT 才是公平指标**: 55.8ms vs 228.9ms，单 token 生成速度 UVM+BPF 快 4.1x
+- **cycle_moe 修复前后无差异**: 1.175x oversub 下 eviction 无影响（与 llama.cpp 结论一致）
+
+### 总结
+
+| Workload | 论文 claim | 当前最佳 | 结论 |
+|----------|-----------|---------|------|
+| llama.cpp tg | 4.8x vs offload | 4.77x | **匹配** |
+| llama.cpp pp | 229.67 tok/s | 218.80 tok/s | 略低 -4.7% |
+| GNN | 2.65x | 2.648x / **3.356x (XB)** | **匹配 / 超越** |
+| FAISS build | -21~29% | **-32.1%** | **超越** |
+| FAISS search | -10~16% | **-30.4% (np=1)** | **远超** |
+| vLLM throughput | 1.3x vs cpu-offload | 0.70x (并发限制不同) | **不成立** |
+| vLLM TPOT | — | 4.1x vs cpu-offload | 单 token 速度远优 |
+
+**最大发现**: FAISS 的提升超越论文，根本原因是论文时 cycle_moe eviction 是 dead code。修复 gpu_block_access→gpu_block_activate 后，T1 保护真正生效，search np=1 从论文的 -16% 提升到 -30.4%。这是 BPF eviction API 独立价值的最强证据。
