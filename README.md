@@ -1,4 +1,4 @@
-# gpu_ext
+# gpu_ext: eBPF extension in GPU driver 
 
 Extending Linux GPU drivers with eBPF for programmable memory offloading and scheduling.
 
@@ -13,6 +13,8 @@ Modern GPU workloads (LLM inference, vector databases, DNN training) exhibit div
 - **Observability**: Tracing tools for memory and scheduling events
 
 Inspired by Linux kernel's `sched_ext`, gpu_ext brings the same extensibility to GPU drivers.
+
+Note: the device-side runtime path referenced by gpu_ext is based on [bpftime](https://github.com/eunomia-bpf/bpftime).
 
 ## Structure
 
@@ -163,6 +165,8 @@ uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 > Yusheng Zheng, Tong Yu, Yiwei Yang, Minghui Jiang, Xiangyu Gao, Jianchang Su, Yanpeng Hu, Wenan Mao, Wei Zhang, Dan Williams, Andi Quinn
 > [arXiv:2512.12615](https://arxiv.org/abs/2512.12615)
 
+Documentation sync note: when paper-facing claims, policies, or benchmark configurations change, update this file, `docs/gpu-ext/paper/README.md`, and `workloads/README.md` together.
+
 ## Roadmap
 
 ### Kernel Driver Extensible Framework
@@ -171,12 +175,6 @@ uv run python configs/bench.py --uvm -o results/uvm_baseline.json
 - [x] **GPU kernel submission-level scheduling**: `bpf_nv_gpu_preempt_tsg` kfunc for cross-process GPU TSG preemption. Two trigger paths verified: bpf_wq from struct_ops hooks, and sleepable uprobe on `cuLaunchKernel` (avg 312us, no bpf_wq needed). (see `docs/gpu_preempt_kfunc_plan.md`)
 - [x] **CPU-GPU coordinated scheduling**: Combined sched_ext + GPU memory/scheduling policies (FPRS). ~5% improvement on multi-tenant serving. (see `docs/xcoord_plan.md`)
 - [ ] **Better coordinated scheduling policy**: Exploring AI-driven policy search for improved CPU-GPU coordination.
-
-### Device-Side Extensions
-
-- [ ] **Safety verification**: Evaluate how the BPF verifier can reject unsafe GPU extension programs. Design exists in paper; no implementation yet.
-- [x] **NVBit + eBPF integration (POC)**: Proof-of-concept completed via [bpftime](https://github.com/eunomia-bpf/bpftime).
-- [ ] **NVBit + eBPF integration (production)**: Full integration with bpftime runtime. In progress.
 
 ### Policy and Evaluation
 

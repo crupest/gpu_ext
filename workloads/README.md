@@ -2,6 +2,8 @@
 
 This directory contains all benchmark workloads used in the gpu_ext paper evaluation.
 
+Paper-facing note: when benchmark configs, baseline policies, or headline results change, sync this file with `README.md` and `docs/gpu-ext/paper/README.md`. If the change touches device-side claims, check the current bpftime implementation first.
+
 ## Hardware Requirements
 
 | Server | CPU | RAM | GPU | Used For |
