@@ -966,8 +966,88 @@ Phase 2 (持续 preempt B):
 3. ~~kfunc 编译 + 加载~~ ✅ 模块编译成功，kfunc 注册到 kallsyms
 4. ~~kfunc 端到端测试~~ ✅ BPF → bpf_wq → kfunc → RM → GSP → preempt 全链路验证
 5. ~~跨进程 preempt 验证~~ ✅ CUDA-A 的 TSG 被 CUDA-B 触发的 struct_ops → bpf_wq → kfunc 成功 preempt
-6. **集成到 BPF 调度策略** — 在 UVM eviction/prefetch hooks 中通过 bpf_wq 调用 kfunc preempt
+6. ~~集成到 BPF 调度策略~~ → 改为 §8.12 multi-tenant eval（直接对比 kfunc vs timeslice）
 7. **动态 preempt 策略** — 根据 fault rate / QoS 信号自动决定 preempt 目标和频率
+
+### 8.12 Multi-Tenant kfunc vs Timeslice 对比 Eval (2026-03-19, WIP)
+
+**目的**: 在论文 compute-bound multi-tenant 同一 workload 上，直接对比 kfunc on-demand preempt 与论文的 timeslice 分化方法。
+
+**实验设计**: 4-way comparison
+
+| Mode | Timeslice 策略 | Preempt 策略 | 回答什么 |
+|------|-----------|---------|---------|
+| native | 默认 | 无 | baseline |
+| timeslice_only | LC:1s BE:200us | 无 | 论文现有数据 (P99: 1188→53us) |
+| kfunc_only | 默认 | uprobe on cuLaunchKernel→preempt all BE TSG | 能否替代 timeslice？|
+| timeslice_kfunc | LC:1s BE:200us | uprobe→preempt | kfunc 在论文基础上加多少？|
+
+**Workload** (与论文完全相同):
+- 2 LC (bench_lc) + 4 BE (bench_be)
+- 每进程 4 CUDA streams × 50 compute kernels, 32M elements (~80ms/kernel)
+- multi_stream_bench binary from co-processor-demo repo
+- 5~10 runs per mode, per-run P99 mean
+
+**新增代码**:
+- `extension/uprobe_preempt_multi.bpf.c` — 多目标 uprobe preempt (max 16 BE TSGs, 3-probe auto-capture, per-CPU cooldown)
+- `extension/uprobe_preempt_multi.c` — loader (--be-name, --lc-pid, --cooldown-us, --target, --no-auto)
+- `docs/gpu-ext/eval/multi-tenant-scheduler/kfunc_preempt_test.py` — 4-mode runner
+
+**Key metrics**:
+- LC per-run P99 mean/std (与论文相同)
+- LC >200us / >1ms fraction (kfunc-specific: 暴露 quantum wait vs on-demand 差异)
+- BE throughput (确认 kfunc 不饿死 BE)
+- Preempt latency (from BPF stats)
+
+**预期**:
+- timeslice_only 已把 P99 压到 53us，incremental gain 可能小
+- kfunc_only 的优势在于不需要预设小 timeslice（不影响 BE 吞吐）
+- 最有价值的场景是 BE timeslice 较大时（不愿牺牲 BE），kfunc 仍能保护 LC
+
+**状态**: 实验进行中，已有两轮结果。
+
+#### Round 1 (2026-03-19): 替代 benchmark, 无效
+
+Codex 因原始 `multi_stream_bench` 路径不存在，自写了替代 benchmark，kernel 执行时间 ~13s（应为 ~80ms）。所有 4 mode 数据完全相同，无效。
+
+#### Round 2 (2026-03-19): 正版 benchmark, 发现两个 bug
+
+使用 `eunomia-bpf/co-processor-demo` 的原版 `multi_stream_bench`（复制到 `microbench/multi-stream/`）。
+
+| Mode | LC P99 (us) | BE Throughput (k/s) |
+|------|------------|---------------------|
+| native | 2343 | 11.49 |
+| **timeslice_only** | **42.5** | **11.57** |
+| kfunc_only | 2328 | **3.11** |
+| timeslice_kfunc | 2297 | **3.18** |
+
+**发现的 Bug**:
+1. **Kernel duration 不匹配**: 32M elements → ~13ms kernels (论文用 ~80ms)，需加大 workload
+2. **kfunc uprobe 未过滤进程名**: `preempt_on_launch` uprobe 挂载到所有进程的 `cuLaunchKernel`，BE 自己的 launch 也触发 preempt BE → BE 吞吐暴跌 73%。需添加 `lc_comm` rodata 过滤，只有 `bench_lc` 的 launch 才触发 preempt
+
+**修复方案**:
+- BPF: `preempt_on_launch()` 开头加 `bpf_get_current_comm` + `lc_comm` 匹配
+- Test script: 增大 workload_size 到 ~200M elements 以匹配 ~80ms kernel
+- 重新编译 + 重跑
+
+#### Round 3 (2026-03-19): Bug 修复后重跑
+
+修复: (1) BPF 添加 `lc_comm` rodata 过滤，只有 bench_lc 的 cuLaunchKernel 触发 preempt (2) workload 调到 200M elements → ~78ms kernel (3) benchmark OOM fix
+
+| Mode | LC P99 mean (us) | BE Throughput (k/s) |
+|------|-----------------|---------------------|
+| native | 38.2 | 1.909 |
+| timeslice_only | 42.2 | 1.908 |
+| kfunc_only | 2302.4 | 1.810 |
+| timeslice_kfunc | 2302.1 | 1.814 |
+
+**Per-run 分析**: kfunc P99 均值被 2 次 ~11ms spike 拉高。去掉 spike 后，kfunc 大多数 run 的 P99 (28-31us) 实际上低于 native (37-43us)。
+
+**核心问题**: native P99 已经很低 (~38us)，与论文的 1188us 不匹配。当前 workload (2LC+4BE, 78ms kernel) 竞争不足以产生调度瓶颈。可能原因：
+- RTX 5090 有更多 SM (170)，6 个进程不足以饱和
+- 论文的 1188us spike 来自更特殊的竞争 timing
+
+**下一步**: 增加竞争强度 — 更多 BE 进程（如 8-12 个），或缩短 kernel 让 launch 更频繁，或使用论文原始参数（需要确认原始 benchmark 的 CUDA kernel 实现是否一致）
 
 ### 8.9 kfunc 端到端测试验证 (2026-03-04)
 
@@ -1234,4 +1314,7 @@ preempt throughput: 5504 preempts/sec
 - `scripts/extension/preempt/run_preempt_kfunc_test.sh` — 非交互式端到端测试脚本
 - `scripts/extension/preempt/bench_preempt_kfunc.py` — kfunc 延迟基准测试（自动化）
 - `scripts/extension/preempt/bench_preempt_kfunc.sh` — kfunc 延迟基准测试（shell 版）
+- `extension/uprobe_preempt_multi.bpf.c` — 多目标 uprobe preempt（16 targets, auto-capture, cooldown）
+- `extension/uprobe_preempt_multi.c` — 多目标 uprobe preempt loader
+- `docs/gpu-ext/eval/multi-tenant-scheduler/kfunc_preempt_test.py` — 4-mode kfunc vs timeslice eval runner
 - `extension/prefetch_cross_block_v2.bpf.c` — bpf_wq 使用模式参考
