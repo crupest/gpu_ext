@@ -201,9 +201,160 @@ The reader learns nothing new about GPU resource management. No surprising insig
 
 ---
 
-## Part IV: The Missing Insight
+## Part IV: The Core Insights (Sharpened)
 
-### What the reader should learn from reading the paper
+Six insights, ranked by cutting power. The first two are diagnostic (what's wrong with the paper); the remaining four are the intellectual content the paper must convey. Each must be stated in a position where the reader cannot miss it.
+
+---
+
+### Insight 1: gpu_ext currently doesn't change how you think
+
+Before reading gpu_ext: "GPU drivers need extensibility."
+After reading gpu_ext: "OK, they added eBPF hooks to the GPU driver."
+
+No cognitive shift. No "aha moment." XRP changed how people think about WHERE to place eBPF hooks. cache_ext changed how people think about the page cache as pluggable policy. gpu_ext needs to change how people think about **what extensibility means for complex heterogeneous subsystems** — that a single-mechanism model (struct_ops) breaks when the subsystem is simultaneously async, cross-domain, and application-semantic-dependent, and that **composable multi-mechanism pipelines are the necessary next step for eBPF extensibility**.
+
+The test: does reading the paper give the reader a new way of thinking, or just a faster tool?
+
+---
+
+### Insight 2: The paper hides its own contribution
+
+The implementation has L2-L4 capabilities. The paper only presents L1.
+
+| Mechanism | In implementation | In paper |
+|---|---|---|
+| `bpf_gpu_migrate_range()` — sleepable kfunc, cross-VA-block DMA | Used by 10+ policies, GNN 3.36x | **NOT MENTIONED** |
+| `bpf_wq` — async BPF work queue | Used by all cross-block policies | **NOT MENTIONED** |
+| `bpf_nv_gpu_preempt_tsg()` — cross-process GPU preemption | P99 -95% | **NOT MENTIONED** |
+| Sleepable uprobe → kfunc → GPU hardware | Crosses user→kernel→GPU | **NOT MENTIONED** |
+| Multi-program composition | All advanced policies | **NOT MENTIONED** |
+
+The paper shows 5 trivial kfuncs (move_head, move_tail, set_attr, reject_bind, sched_preempt). Reviewer correctly concludes: "just struct_ops for UVM." **The system evolved past the paper. The novelty is in the code, not in the text.**
+
+---
+
+### Insight 3 (THE DEEPEST): Not just WHAT to decide — the execution strategy itself is workload-dependent
+
+This is the paper's most original argument, and it currently appears nowhere.
+
+**The naive counter-argument the paper must preemptively kill:**
+> "Just make the struct_ops callback return a richer result — a list of prefetch targets, a priority score, a migration hint. The driver executes them asynchronously. Problem solved. No need for bpf_wq or kfuncs."
+
+**Why this fails:** Even a richer callback returning a list of targets would require the driver to implement a **fixed asynchronous execution engine** for DMA scheduling, batching, and prioritization. But the execution strategy itself is workload-dependent — it cannot be anticipated by a general-purpose driver:
+
+| Workload | Decision (what) | Execution strategy (how) | Why a "return list" callback can't express it |
+|---|---|---|---|
+| GNN graph scan | Which VA blocks to prefetch | Sequential stride — prefetch N adjacent blocks in scan direction | Driver doesn't know scan direction or stride width |
+| FAISS build/search | Which phase, which prefetch scope | Phase-gated DMA — wide stride during build, narrow during search | Driver doesn't know which phase; gating logic is app-specific |
+| MoE inference | Which expert pages to migrate | Proactive batch migration — move full expert at token boundary, BEFORE fault | No fault has occurred yet; trigger is a `cudaStreamSynchronize` uprobe |
+| Multi-tenant LC/BE | Which process to preempt | Instant cross-process preemption triggered by `cuLaunchKernel` | Driver doesn't see app API calls; preemption target requires cross-process authority |
+
+A "return a list" callback encodes the **WHAT** but not the **WHEN**, **HOW MUCH**, **IN WHAT ORDER**, or **TRIGGERED BY WHOM**. The driver would need to anticipate all possible scheduling, batching, and prioritization strategies for all possible workloads — which is exactly the monolithic policy problem the paper is trying to solve.
+
+> **Policy extensibility requires that authors control both the decision AND the execution strategy.**
+
+This sentence should appear in the abstract. It is the deepest reason why gpu_ext's architecture (struct_ops + bpf_wq + sleepable kfuncs + uprobes) is a **necessary composition**, not an engineering convenience. It's also the sentence that makes gpu_ext a generalizable insight rather than a point solution: any future heterogeneous subsystem (CXL memory tiering, DPU offload, NPU scheduling) where the execution strategy is workload-dependent will face the same compositional requirement.
+
+**Evidence:** struct_ops alone (L1) = GNN 2.65×. Adding programmable async execution (L2) = GNN 3.36× (+27%). The 27% gap precisely measures the value of giving the policy author control over execution strategy, not just the decision.
+
+---
+
+### Insight 4: Two orthogonal root causes → two orthogonal mechanisms
+
+The paper needs a clean decomposition that makes the design feel inevitable, not ad hoc.
+
+**Root Cause A — Timescale mismatch.** Policy decision = μs (inside fault handler). Policy operation = ms (PCIe DMA across VA blocks). 1000× gap. The synchronous callback model works for CPU scheduling (ns decision, ns effect — sched_ext) and page cache (μs decision, μs effect — cache_ext). It breaks when the effect is 1000× slower than the decision.
+
+→ **Mechanism A: Sync/async split.** Struct_ops hooks make fast synchronous decisions; bpf_wq dispatches sleepable kfuncs for slow operations.
+
+**Root Cause B — Information mismatch.** The GPU driver sees page fault addresses. It does NOT see: that `cuLaunchKernel` is about to fire (preemption need), that a training epoch ended (prefetch opportunity), which computation phase the workload is in (phase-gated policy). The optimal policy trigger is often an application event that occurs BEFORE the driver sees anything.
+
+→ **Mechanism B: Proactive app-boundary hooks.** Sleepable uprobes on unmodified application APIs, invoking GPU-controlling kfuncs directly.
+
+**Why orthogonal matters:** These are independent axes. You can have timescale mismatch without information mismatch (e.g., large sequential DMA triggered by a page fault — the fault is the right trigger, but the operation outlives the handler). You can have information mismatch without timescale mismatch (e.g., a fast in-block eviction policy that depends on app phase — the operation is fast, but the driver lacks the semantic). The paper needs BOTH solutions, and each is justified independently. This makes the design principled, not ad hoc — the reader can verify that each mechanism solves exactly one root cause and that neither is redundant.
+
+**Critical refinement: the split is enforced, not chosen.** The sync/async split is not a design preference — it is **enforced by the BPF type system at load time**. Synchronous struct_ops hooks run in fault-handler context (non-sleepable BPF program type); async operations run in process context via bpf_wq (sleepable BPF program type). The BPF verifier rejects sleepable function calls in non-sleepable context. This means the architecture is a **necessary decomposition imposed by the safety model**, not an arbitrary design decision. This is a strong argument: the system's structure follows from BPF's type-safety guarantees, not from engineering taste.
+
+---
+
+### Insight 5: User-space → Kernel BPF → GPU hardware (the "aha moment")
+
+All prior eBPF extensibility systems operate within the kernel:
+- XRP: NVMe IRQ handler → NVMe resubmission (kernel → kernel)
+- cache_ext: page cache hook → folio list manipulation (kernel → kernel)
+- sched_ext: scheduler hook → dispatch queue (kernel → kernel)
+
+gpu_ext's proactive path crosses **three domains** in one causal chain:
+```
+User-space (cuLaunchKernel) → Kernel BPF (uprobe) → GPU hardware (TSG preemption)
+```
+
+A single BPF program, triggered by a user-space function call, directly controls GPU hardware — transparently, safely, without modifying the application. **No prior eBPF extensibility system crosses this boundary.**
+
+**Honest framing:** Uprobes themselves are a standard BPF mechanism. The novelty is not uprobes per se — it is **combining application-boundary triggers with GPU-controlling kfuncs**. Prior extensibility systems (XRP, cache_ext, sched_ext) attach policies to kernel events (interrupts, syscalls, scheduler ticks) and do not use uprobes to trigger kernel-privilege hardware operations on a device. gpu_ext is the first to do this.
+
+Concrete instances:
+- `cuLaunchKernel` uprobe → `bpf_nv_gpu_preempt_tsg()` → GPU TSG context switch: **P99 -95%**
+- `cudaStreamSynchronize` uprobe → `bpf_gpu_migrate_range()` → PCIe DMA: **proactive prefetch before next epoch**
+- `cudaMallocManaged` uprobe → BPF map → struct_ops: **transparent allocation semantic relay**
+
+**The sharpest evidence:** Advisory timeslice control via struct_ops (the synchronous callback approach) has **zero measurable effect** on LC tail latency in the multi-tenant case. Proactive uprobe-triggered preemption reduces P99 by 95%. The delta is not incremental — it is the difference between "no effect" and "solved." This single comparison proves both Root Cause B (the driver lacks the information to act) and the necessity of Mechanism B (the application boundary provides it). It should be a highlighted result in the paper.
+
+---
+
+### Insight 6: The capability progression IS the novelty argument
+
+| Layer | Mechanism | What it enables | Evidence |
+|---|---|---|---|
+| L0: No BPF | Stock driver | Baseline | 1× |
+| L1: Advisory hooks | struct_ops (move_head/tail) | Eviction/prefetch hints | GNN 2.65× |
+| L2: Active async | + bpf_wq + sleepable kfuncs | Cross-block prefetch, programmable execution strategy | GNN **3.36×** (+27% over L1) |
+| L3: Proactive app-boundary | + sleepable uprobe → kfunc | Pre-fault migration, instant preemption | LC P99 **-95%** |
+
+**The gaps between layers — not the absolute numbers — are the novelty evidence.**
+
+- L1→L2 gap (+27%): measures the value of **programmable execution strategy** (Insight 3)
+- L0→L3 with advisory=0%: measures the value of **proactive app-boundary hooks** (Insight 5)
+- The fact that L1 alone leaves 27% on the table: proves **struct_ops is insufficient** (Insight 3)
+- The fact that L3 without uprobe = 0% effect: proves **driver-internal hooks are insufficient** (Insight 4, Root Cause B)
+
+This table is gpu_ext's equivalent of XRP's Table 2 (syscall=1.15×, NVMe=2.5×). It should be the **first evaluation experiment**, positioned in the motivation section (§2), not buried in §6. It does all the heavy lifting: every design choice in the paper becomes self-evident once the reader sees this table.
+
+L1 is what the paper currently presents. L2-L3 are what the paper hides. **The novelty lives in the gaps.**
+
+---
+
+### Summary: What the reader should take away
+
+> GPU resource management is the first OS subsystem where **a single extensibility mechanism (struct_ops) is provably insufficient**. Two orthogonal root causes explain why: the **timescale mismatch** (μs decision / ms operation) requires an async execution path, and the **information mismatch** (driver sees faults, not intent) requires proactive app-boundary hooks. Moreover, **the execution strategy — not just the policy decision — is workload-dependent**, which means the policy author must control the full pipeline from trigger to DMA completion. gpu_ext demonstrates that composable eBPF policy pipelines (struct_ops + bpf_wq + sleepable kfuncs + uprobes) are the necessary abstraction for complex heterogeneous subsystems.
+>
+> **This is a generalizable insight.** As OS subsystems incorporate more heterogeneous, async, cross-domain resources (CXL memory tiering, DPU offload, NPU scheduling), single-mechanism extensibility will become insufficient. gpu_ext's compositional model — and the principled decomposition that justifies it — is the contribution that outlives the specific system.
+
+---
+
+### Coverage map: Sharpened insights vs. original Part IV
+
+| Original Part IV section | Status | Covered by | What changed |
+|---|---|---|---|
+| **"What the reader should learn"** (simultaneous convergence argument) | **SUBSUMED** by Insight 3 + Summary | Insight 3 is a strictly stronger version: it doesn't just say "convergence is unique" — it explains WHY convergence breaks single-mechanism extensibility (because execution strategy is workload-dependent). The "simultaneous convergence" framing is now the Summary's concluding generalization, not the lead argument. |
+| **"Why composition is necessary" (5-row novelty table)** | **SUBSUMED** by Insight 3's 4-column table | The old table listed WHAT fails + WHAT's needed. Insight 3's table adds two columns: the workload-specific execution strategy (HOW) and why a "return list" callback can't express it. The old table is a subset of the new one — every row is preserved but with sharper justification. |
+| **"The uprobe → kfunc → GPU path" (aha moment)** | **REFINED** into Insight 5 | Core claim preserved identically. Two additions: (1) honest framing — "uprobes are standard BPF; novelty is combining app-boundary triggers with GPU-controlling kfuncs, not uprobes per se"; (2) sharpest evidence added — multi-tenant advisory=0% vs uprobe=-95% as proof of Root Cause B. |
+| **"The capability progression (L1-L4 table)"** | **REFINED** into Insight 6 | Table preserved (L4 semantic relay dropped to focus on the 3 layers with quantified evidence). Key addition: each gap is now explicitly labeled with which Insight it proves (e.g., L1→L2 = Insight 3, L0→L3 = Insight 5). The table becomes a cross-reference into the argument, not a standalone exhibit. |
+
+**New material with no original equivalent:**
+- **Insight 1** (diagnostic: "doesn't change how you think") — extracted from Part III diagnosis, elevated to Part IV lead position
+- **Insight 2** (diagnostic: "paper hides its contribution") — extracted from Part III, elevated
+- **Insight 3** (execution strategy is workload-dependent) — **entirely new**, sourced from intro_draft P3
+- **Insight 4** (orthogonal root causes + BPF type system enforcement) — **entirely new**, sourced from intro_draft P4
+
+---
+
+### Original Part IV (preserved for reference)
+
+> The content below is the original Part IV before sharpening. See coverage map above for how each section maps to the new insights.
+
+#### [ORIGINAL] What the reader should learn from reading the paper
 
 The specific insight that gpu_ext should foreground:
 
@@ -215,7 +366,7 @@ The specific insight that gpu_ext should foreground:
 
 If a reader finishes the paper with this understanding, gpu_ext has changed how they think — not just about GPU extensibility, but about the future of eBPF extensibility in general. That's a research contribution.
 
-### Why composition is necessary for GPU (the novelty table)
+#### [ORIGINAL] Why composition is necessary for GPU (the novelty table)
 
 | GPU characteristic | Why struct_ops alone fails | What's needed |
 |---|---|---|
@@ -227,7 +378,7 @@ If a reader finishes the paper with this understanding, gpu_ext has changed how 
 
 **None of these rows apply to cache_ext or sched_ext.** The CPU page cache does not have a PCIe bandwidth bottleneck. The CPU scheduler does not need to trigger millisecond DMA operations. CPU processes share one coherent memory — there is no "cross-domain migration." This table IS the novelty argument.
 
-### The uprobe → kfunc → GPU path is the "aha moment"
+#### [ORIGINAL] The uprobe → kfunc → GPU path is the "aha moment"
 
 All prior eBPF extensibility systems operate within the kernel:
 - XRP: NVMe IRQ handler → NVMe resubmission (kernel → kernel)
@@ -246,7 +397,7 @@ Concrete instances:
 - `cudaStreamSynchronize` uprobe → `bpf_gpu_migrate_range()` → PCIe DMA: **proactive prefetch before next epoch**
 - `cudaMallocManaged` uprobe → BPF map → struct_ops: **transparent allocation semantic relay**
 
-### The capability progression (gpu_ext's "Table 2")
+#### [ORIGINAL] The capability progression (gpu_ext's "Table 2")
 
 | Layer | Mechanism | What it enables | Example result |
 |---|---|---|---|
@@ -299,9 +450,11 @@ These gaps — not the absolute numbers — are the novelty evidence.
 - Compress FAISS + vLLM case studies from 2 paragraphs each to 1 paragraph each in a breadth table
 - Remove leftover internal annotations (\xiangyu{}, \yusheng{}, \todo{}) and placeholder values (\speedupAccel = "xxx")
 
-### Thesis (reframed)
+### Thesis (reframed — incorporates Insight 3)
 
-> "GPU resource management requires an extensible OS interface that goes beyond advisory hooks: it needs active asynchronous operations, proactive app-boundary hooks, and cross-process kernel-privilege control — capabilities that the synchronous struct_ops model cannot express. We design gpu_ext, which composes struct_ops hooks, sleepable kfuncs, BPF work queues, and uprobes into a cross-domain policy runtime spanning user-space applications, kernel driver, and GPU hardware. gpu_ext's policies improve throughput by up to 4.8x and reduce tail latency by up to 2x, with the async pipeline alone contributing 27% beyond what synchronous hooks achieve."
+> "GPU resource management policies control up to 73% of execution time under memory oversubscription, yet the policy is trapped inside a monolithic driver. Applying the synchronous struct_ops model (sched_ext, cache_ext) to the GPU driver captures advisory decisions but leaves 27% of the potential improvement unrealized — because **the execution strategy, not just the decision, is workload-dependent**: GNN requires directional stride prefetch, FAISS requires phase-gated DMA, MoE requires proactive batch migration, and multi-tenant scheduling requires cross-process preemption triggered by application API calls. No synchronous callback — no matter how rich its return type — can express these diverse execution strategies.
+>
+> We design gpu_ext, which makes GPU resource management extensible by composing multiple BPF mechanism types: struct_ops hooks for fast advisory decisions, sleepable kfuncs with BPF work queues for programmable async execution, and proactive uprobes on application APIs for intent-driven policies that cross user-space, kernel, and GPU hardware in a single causal chain. Each mechanism resolves one empirically demonstrated root cause (timescale mismatch, information mismatch), and the capability progression proves each layer is necessary: advisory hooks alone achieve 2.65×; adding async execution achieves 3.36× (+27%); adding proactive app-boundary preemption reduces tail latency by 95% where advisory hooks have zero effect."
 
 ---
 
@@ -311,10 +464,12 @@ These gaps — not the absolute numbers — are the novelty evidence.
 |---|---|---|
 | **Surprising observation** | Software overhead grew from 15% to 49% on fast NVMe | Policy controls 73% of oversubscribed GPU decode time |
 | **Quantified naive vs full** | Table 2: syscall=1.15x, NVMe=2.5x | L1=2.65x, L2=3.36x, L3=-95% P99 |
-| **Domain-specific challenge** | NVMe driver lacks FS metadata for address translation | GPU DMA is async (ms vs μs); driver lacks app semantics |
+| **Domain-specific challenge** | NVMe driver lacks FS metadata for address translation | Timescale mismatch (μs/ms) + information mismatch (faults ≠ intent) |
+| **Why richer callbacks fail** | (N/A — one hook suffices for NVMe) | Execution strategy is workload-dependent: stride, phase-gated, proactive, cross-process — a "return list" callback can't express WHEN/HOW/ORDER |
 | **Domain-specific mechanism** | Metadata digest + NVMe request resubmission | Sleepable kfuncs + bpf_wq + uprobe→GPU hardware |
 | **"Aha moment"** | BPF can resubmit I/O from the interrupt handler | Uprobe on cuLaunchKernel can directly preempt GPU hardware |
 | **Domains crossed** | kernel → kernel | **user-space → kernel → GPU hardware** |
+| **Necessary decomposition** | Single hook (simple subsystem) | BPF type system enforces sync/async split — not a design choice |
 | **Deep case study** | BPF-KV (controlled, best case) | GNN cross-block (shows full async pipeline) |
 | **Real-world case study** | WiredTiger/YCSB 1.25x (honest: "63% I/O bound") | MoE 4.8x (with honest UVM+hints comparison) |
 | **Honest modest result** | WiredTiger 1.25x, explained | vLLM 1.3x (explained: low oversub ratio) |
