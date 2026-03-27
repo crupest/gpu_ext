@@ -27,18 +27,49 @@ We DO claim:
 
 ## 2. Exploration Scale
 
+### 2.1 Aggregate metrics
+
 | Metric | Value | Source |
 |---|---|---|
-| Active development sessions | 12 (with safety events) | Q4 session log |
+| Total sessions (primary) | 25 | Q6 |
+| Active sessions (with safety events) | 12 | Q4 |
 | Sessions with BPF policy code edits | 7 | Q4 |
-| Total session transcript data | 448 MB | Q4 |
-| Longest single session | 190,190 lines, 201 code edits, 676 shell commands | Session `6b21980a` |
+| Total transcripts (primary + subagent) | 284 | Q6 |
+| **Total tokens consumed** | **5,530,224** (439K input + 5,091K output) | Q6 |
+| **Estimated cost** | **$388.40** (Claude Opus pricing) | Q6 |
+| Total active agent time | 118 hours 39 minutes | Q6 (summed across all sessions) |
+| Total tool invocations | 13,640 | Q6 |
+| Total builds (make/clang) | 234 | Q6 |
+| Total benchmark runs | 974 | Q6 |
+| Total .bpf.c code edits | 244 | Q6 |
+| Total subagent spawns | 154 | Q6 |
 | Distinct BPF policy files in repo | 55 (.bpf.c) | Codebase analysis |
 | Policy/scheduler files created by agent | 11 | Codebase analysis |
 | Policy/scheduler files touched by agent | 29 / 55 | Codebase analysis |
 | Distinct policy×workload configurations tested | ≥59 | Result artifact scan |
-| Negative results preserved in repo | 18 performance regressions documented | Q2 safety taxonomy |
+| Negative results preserved in repo | 18 performance regressions | Q2 |
 | Development period | 2026-02-16 to 2026-03-07 (20 days of active work) | Git history |
+| Average tokens per benchmark iteration | 5,678 | Q6 |
+
+### 2.2 Top 5 most active sessions
+
+| Session | Active time | Tokens | Cost | Tool calls | Builds | Benchmarks | .bpf.c edits | Subagents |
+|---|---|---|---|---|---|---|---|---|
+| `1ffa360b` (FAISS + multi-policy) | 28h 46m | 961K | $69.37 | 1,945 | 44 | 165 | 37 | 65 |
+| `e19dd100` (xCoord + scheduler) | 16h 26m | 862K | $63.44 | 1,872 | 27 | 191 | 57 | 19 |
+| `6b21980a` (cross-block + MSched) | 11h 06m | 531K | $39.51 | 1,230 | 53 | 86 | 39 | 4 |
+| `b1e7bc20` (preemption kfunc) | 5h 43m | 532K | $36.54 | 851 | 42 | 13 | 29 | 13 |
+| `9d654c47` (xCoord doc + refactor) | 6h 10m | 117K | $8.67 | 587 | 15 | 32 | 9 | 0 |
+
+### 2.3 Notable extremes
+
+| Record | Value | Session |
+|---|---|---|
+| Longest unbroken active window | 5h 14m (03:11–08:25 UTC) | `1ffa360b` |
+| Most edits in one session | 259 Edit/Write invocations | `e19dd100` |
+| Peak tool density (1 hour) | 254 tool calls/hr (73 Bash, 68 Edit, 30 Read...) | `6b21980a` |
+| Highest error rate | 5.21% of Bash output lines contain errors | `6c0aa1fb` |
+| Subagent vs direct work | 1.7% of tool calls are subagent spawns | All sessions |
 
 ---
 
@@ -97,6 +128,8 @@ Each case study shows a complete **explore → fail → recover → converge** a
 
 ### 4.1 Case A: FAISS Phase-Adaptive Prefetch
 
+**Session:** `1ffa360b` | **Active time:** 6h 14m | **Tokens:** 227,146 ($16.56) | **Tool calls:** 44 edits, 10 builds, 42 benchmarks, 17 subagents | **Period:** 2026-03-05 01:09–08:25 UTC
+
 **Problem:** FAISS has two phases (BUILD: sequential scan, SEARCH: random access) that need different prefetch strategies. The driver treats both identically.
 
 **Exploration arc (5 policy iterations, 8 configurations benchmarked):**
@@ -114,6 +147,8 @@ Each case study shows a complete **explore → fail → recover → converge** a
 **Aha moment:** The agent isolated two independent causes one at a time — first the classifier, then the eviction policy — and discovered that **the remaining regression was not classification error but wrong eviction**.
 
 ### 4.2 Case B: GPU Preemption via Sleepable Kfunc
+
+**Session:** `b1e7bc20` | **Active time:** 5h 43m | **Tokens:** 650,849 ($45.38) | **Tool calls:** 177 edits (29 .bpf.c), 42 builds, 15 benchmarks, 13 subagents | **Period:** 2026-03-03 21:31 – 2026-03-04 19:22 UTC
 
 **Problem:** Multi-tenant GPU scheduling requires preempting another process's GPU context — an operation no user-space framework or synchronous struct\_ops hook can perform.
 
@@ -135,6 +170,8 @@ Each case study shows a complete **explore → fail → recover → converge** a
 **Aha moment:** `SEC("uprobe.s/...")` already runs in sleepable process context — the preempt kfunc can be called directly at `cuLaunchKernel` time, bypassing the workqueue entirely. This is the **user-space → kernel BPF → GPU hardware** path that no prior eBPF system achieves.
 
 ### 4.3 Case C: Cross-Block Multi-Stride Prefetch
+
+**Session:** `6b21980a` | **Active time:** 11h 06m | **Tokens:** 732,816 ($51.49) | **Tool calls:** 250 edits (59 .bpf.c), 54 builds, 94 benchmarks, 4 subagents | **Period:** 2026-02-27 04:13 – 2026-02-28 04:48 UTC
 
 **Problem:** GNN training scans graph data sequentially across VA blocks. Can deeper lookahead (prefetching K>1 blocks ahead) improve over single-block prefetch?
 
@@ -172,18 +209,18 @@ All three cases follow the same arc:
 
 Policy space exploration is inherently lossy:
 
-| Case | Configurations tested | Positive | Neutral/Negative |
-|---|---|---|---|
-| A (FAISS) | 8 | 2 (D3, D4-fixed) | 6 |
-| B (Preemption) | 6 mechanisms | 2 (uprobe+kfunc, filtered) | 4 |
-| C (Cross-block) | 6 configs | 1 (K=1 direction) | 5 |
-| **Total** | **20** | **5 (25%)** | **15 (75%)** |
+| Case | Time | Tokens (cost) | Configs tested | Positive | Negative |
+|---|---|---|---|---|---|
+| A (FAISS) | 6h 14m | 227K ($16.56) | 8 | 2 | 6 |
+| B (Preemption) | 5h 43m | 651K ($45.38) | 6 mechanisms | 2 | 4 |
+| C (Cross-block) | 11h 06m | 733K ($51.49) | 6 configs | 1 | 5 |
+| **Total** | **23h 03m** | **1.61M ($113.43)** | **20** | **5 (25%)** | **15 (75%)** |
 
 This is not agent incompetence — it is the nature of the search problem. The question is whether bad policies cause recoverable or catastrophic failures.
 
 ### 5.3 The containment argument (one paragraph for the paper)
 
-> Over 6 weeks of AI-assisted GPU policy development, we documented 50 safety-relevant events across 12 active sessions. These included 2 BPF verifier rejections (caught at load time), 2 GPU memory faults (recovered by driver), 18 performance regressions (recovered by policy unload), 24 logic bugs (discovered via tracing and benchmarks), and 2 system hangs (recovered with cleanup tools). **Zero events caused kernel panics, data corruption, or irrecoverable system state.** The same policy bugs in a directly modified driver would risk page table corruption (from the `move_head` race), kernel panics (from the hash map timeout), and multi-hour rebuild cycles (for every iteration). eBPF's containment model — load-time verification, runtime fault isolation, and hot-swappable policy detachment — converts catastrophic failures into recoverable ones, making iterative policy exploration feasible at the pace required for automated tools.
+> Over 6 weeks of AI-assisted GPU policy development (5.5M tokens, $388, 119 active hours, 13,640 tool invocations, 974 benchmark runs), we documented 50 safety-relevant events across 12 active sessions. These included 2 BPF verifier rejections (caught at load time), 2 GPU memory faults (recovered by driver), 18 performance regressions (recovered by policy unload), 24 logic bugs (discovered via tracing and benchmarks), and 2 system hangs (recovered with cleanup tools). **Zero events caused kernel panics, data corruption, or irrecoverable system state.** The same policy bugs in a directly modified driver would risk page table corruption (from the `move_head` race), kernel panics (from the hash map timeout), and multi-hour rebuild cycles (for every iteration). eBPF's containment model — load-time verification, runtime fault isolation, and hot-swappable policy detachment — converts catastrophic failures into recoverable ones, making iterative policy exploration feasible at the pace required for automated tools. The three detailed case studies consumed 1.6M tokens ($113) over 23 hours of active agent time, producing 20 distinct policy configurations of which only 5 (25%) were positive — yet every failure was recovered in minutes, not hours.
 
 ---
 
