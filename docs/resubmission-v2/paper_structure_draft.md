@@ -207,6 +207,8 @@ Six insights, ranked by cutting power. The first two are diagnostic (what's wron
 
 ---
 
+> **[CRITICAL REVIEW NOTE]** Insights 1-2 are diagnostic (internal analysis), NOT for the paper. Insights 3-6 are content but 6 insights dilutes the paper. A SOSP paper needs ONE core insight + 1-2 supporting root causes. See `critical_review.md` §II Problem 2.
+
 ### Insight 1: gpu_ext currently doesn't change how you think
 
 Before reading gpu_ext: "GPU drivers need extensibility."
@@ -233,6 +235,8 @@ The implementation has L2-L4 capabilities. The paper only presents L1.
 The paper shows 5 trivial kfuncs (move_head, move_tail, set_attr, reject_bind, sched_preempt). Reviewer correctly concludes: "just struct_ops for UVM." **The system evolved past the paper. The novelty is in the code, not in the text.**
 
 ---
+
+> **[CRITICAL REVIEW NOTE]** This argument is over-engineered. The 4-column table invites the counter: "just add an extensible DMA scheduler API." The stronger argument is: (1) BPF type system ENFORCES the sync/async split at load time — not a design choice; (2) L1→L2 = +27% is a measured gap. Lead with empirical evidence + type system enforcement, not philosophical "execution strategy" argument. See `critical_review.md` §II Problem 3.
 
 ### Insight 3 (THE DEEPEST): Not just WHAT to decide — the execution strategy itself is workload-dependent
 
@@ -311,6 +315,8 @@ Concrete instances:
 | L1: Advisory hooks | struct_ops (move_head/tail) | Eviction/prefetch hints | GNN 2.65× |
 | L2: Active async | + bpf_wq + sleepable kfuncs | Cross-block prefetch, programmable execution strategy | GNN **3.36×** (+27% over L1) |
 | L3: Proactive app-boundary | + sleepable uprobe → kfunc | Pre-fault migration, instant preemption | LC P99 **-95%** |
+
+> **[CRITICAL REVIEW NOTE — DATA VERIFICATION REQUIRED]** The -95% P99 number may be misattributed. In `eval.tex:108`, -95% comes from the compute-bound struct_ops timeslice scheduler, NOT from uprobe→kfunc. The actual uprobe kfunc results in `improvement_plan.md` are -48% to -58%. If the -95% is from a different memory-bound experiment where advisory=0% and uprobe=-95%, the raw data source must be identified and cited. If the real L3 number is -50%, use -50%. See `critical_review.md` §II Problem 1.
 
 **The gaps between layers — not the absolute numbers — are the novelty evidence.**
 

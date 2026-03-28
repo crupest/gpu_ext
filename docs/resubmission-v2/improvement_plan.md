@@ -147,6 +147,8 @@ This is **architecturally impossible** with a simple struct_ops table — it req
 
 ---
 
+> **[CRITICAL REVIEW NOTE]** Change 3 (xCoord) is rated P2 but the numbers are modest (+8.5% vLLM, -4.8% latency). These may not justify the page space in a tight paper. Consider as brief mention (1-2 sentences) rather than a full case study. The preemption kfunc (Change 2) is a stronger cross-layer story. See `critical_review.md` §III.
+
 ### Change 3: Add CPU-GPU Coordination (xCoord) as New Cross-Layer Result
 
 **What exists**:
@@ -193,6 +195,8 @@ If feasible, replace random graphs with OGB-Products or Reddit. This addresses r
 **Effort**: HIGH — requires new experiments. Consider for camera-ready.
 
 ---
+
+> **[CRITICAL REVIEW NOTE]** Device-side eval strengthening (Change 5) is less important than it seems. If the paper pivots to host-side composable pipelines as the primary story, device-side becomes secondary. The real risk is design/eval IMBALANCE: if design keeps ~2 pages on SIMT verifier but eval gives 0.5 page, reviewers will question why. Solution: compress BOTH design AND eval for device-side proportionally. See `critical_review.md` §II Problem 5.
 
 ### Change 5: Strengthen Device-Side Evaluation
 

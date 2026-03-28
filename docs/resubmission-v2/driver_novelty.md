@@ -63,6 +63,8 @@ The synchronous path makes fast, local decisions (which pages to keep, which to 
 
 The 27% gap between 2.65x and 3.36x **precisely measures the value of the async pipeline** — the part that goes beyond struct_ops.
 
+> **[CRITICAL REVIEW NOTE]** The XRP parallel is useful but slightly forced. XRP's insight is about WHERE to hook (syscall vs NVMe driver). gpu_ext's insight is about WHAT KIND of mechanism (sync vs async, advisory vs active). Don't structure the paper as "we did what XRP did but for GPU." Better framing: "XRP showed eBPF placement matters; we show eBPF mechanism composition matters — complementary insights in the same extensibility trajectory." See `critical_review.md` §II Problem 10.
+
 ## The XRP Parallel
 
 The parallel to XRP is exact:
@@ -218,6 +220,8 @@ The reactive path handles the common case (steady-state memory management). The 
 | L2: Active async ops | + bpf_wq + sleepable kfuncs | Cross-block prefetch, active migration | GNN 3.36x (27% beyond L1) |
 | L3: Proactive app-boundary | + sleepable uprobe → kfunc | Pre-fault migration, instant preemption | LC preempt on cuLaunchKernel (-48% latency) |
 | L4: Semantic relay | + uprobe captures → shared maps → struct_ops | App structure informs driver policy | Allocation tracking, phase detection |
+
+> **[CRITICAL REVIEW NOTE]** This table uses -48% for L3 (from actual data), which is consistent. But `paper_structure_draft.md` and `intro_draft.md` use -95% for L3. The discrepancy must be resolved before writing paper text. See `critical_review.md` §II Problem 1.
 
 L1 is what the paper currently presents. L2-L4 are what the paper hides. **The novelty lives in L2-L4.**
 

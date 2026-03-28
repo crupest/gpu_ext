@@ -33,6 +33,8 @@ The performance of GPU-based systems increasingly depends on resource management
 GPUs support diverse workloads including latency-sensitive inference [citations], compute-intensive training [citations], graph analytics [citations], and vector search [citations], each imposing distinct resource requirements.
 Given these diverse and evolving requirements, no single static policy fits all scenarios: recent work confirms that default Unified Virtual Memory (UVM) placement policies [Forest, HELM, SUV, DREAM] and scheduling policies [GCAPS, GPREEMPT, XSched] perform poorly across workloads and lack multi-tenant coordination.
 
+> **[CRITICAL REVIEW NOTE]** The 73% observation is workload-specific (oversubscribed 120B MoE at 1.84x). For compute-bound workloads fitting in VRAM, this is ~0%. Must explicitly scope: "Under memory oversubscription — increasingly common as model sizes outpace GPU memory — ..." See `critical_review.md` §II Problem 7.
+
 ### P2: The surprising observation — policy governs performance, but is locked inside the driver
 
 We profiled GPU workloads under memory oversubscription and found that the choice of eviction and prefetch policy determines the volume of PCIe data migration — which in turn dominates execution time.
@@ -40,6 +42,8 @@ On a 120B MoE inference workload requiring 1.84$\times$ oversubscription, PCIe D
 By changing from the driver's default LRU eviction and tree-based prefetching to a workload-adaptive stride prefetch with LFU eviction, we improve MoE decode throughput by 1.3$\times$ over manually tuned UVM hints (and 4.8$\times$ over framework-managed CPU offloading) — with the 1.3$\times$ gap arising specifically from cross-VA-block prefetch that the driver's built-in mechanisms cannot express.
 Yet implementing any new policy today requires directly modifying the proprietary GPU driver, a fragile change that breaks on every driver update.
 This tension — high policy impact, zero policy programmability — motivates an extensible OS interface for GPU resource management.
+
+> **[CRITICAL REVIEW NOTE]** The "richer callback" counter-argument in P3 is elaborate but vulnerable. A reviewer can say "just return DMA schedule descriptors." Stronger counters: (1) that DMA scheduler IS a policy — turtles all the way down; (2) BPF type system enforces sync/async split; (3) L1→L2 = +27% is measured. Simplify the argument to 2-3 sentences. See `critical_review.md` §II Problem 6.
 
 ### P3: Why existing approaches are insufficient
 
@@ -51,7 +55,11 @@ Unfortunately, existing approaches leave this tension unresolved.
 
 **Advisory eBPF hooks** — applying the struct\_ops pattern established by sched\_ext [cite] and cache\_ext [cite] to the GPU driver — provide safe, dynamic hooks that return policy decisions to the driver. For CPU scheduling, this synchronous callback model suffices: the decision (pick next task) and its effect (context switch) both complete in nanoseconds, and the execution strategy is essentially fixed. For GPU memory management, however, the most valuable policy operations — cross-VA-block prefetch, proactive data migration, cross-process preemption — require \emph{active, long-running kernel operations} whose execution strategy varies across workloads: sequential stride prefetch for GNN scans, phase-gated DMA for FAISS build/search transitions, proactive expert migration at MoE token boundaries, batched eviction under multi-tenant memory pressure. Even a richer callback returning a list of prefetch targets would require the driver to implement a fixed asynchronous execution engine for DMA scheduling, batching, and prioritization — decisions that are themselves workload-dependent and cannot be anticipated by a general-purpose driver. Policy extensibility requires that authors control both the decision \emph{and} the execution strategy.
 
+> **[CRITICAL REVIEW NOTE — DATA VERIFICATION REQUIRED]** "proactive uprobe-triggered preemption reduces P99 by 95%" — this number needs verification. The -95% in the current paper is from compute-bound struct_ops timeslice, not uprobe. The actual uprobe kfunc data is -48% to -58%. If this refers to a DIFFERENT experiment (memory-bound scenario where advisory=0%), identify the raw data source. See `critical_review.md` §II Problem 1.
+
 We measure this limitation across workloads: on GNN training, advisory-only hooks achieve 2.65$\times$ while adding async cross-block migration achieves 3.36$\times$ (+27\%); on multi-tenant scheduling, advisory timeslice control alone has no measurable effect on LC tail latency, while proactive uprobe-triggered preemption reduces P99 by 95\%. In both cases, the improvement requires mechanisms that a synchronous callback cannot express, regardless of its return type (Table~\ref{tab:cap-progression}).
+
+> **[CRITICAL REVIEW NOTE]** P4 is strong. The timescale/information mismatch decomposition is clean and orthogonal. However, the new C1/C2/C3 in P6 completely drop the SIMT verifier and cross-layer maps as challenges. These are genuine technical contributions. Recommend adding C4 for SIMT verification as a secondary challenge to avoid losing this contribution entirely. See `critical_review.md` §II Problem 8.
 
 ### P4: Two root causes that break the synchronous callback model
 

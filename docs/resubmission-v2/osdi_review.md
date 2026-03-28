@@ -33,6 +33,8 @@ The paper does use cross-layer mechanisms in some results — the memory microbe
 **W2 (Major): Comparison baselines are selectively weak.**
 
 - **llama.cpp 4.8x**: The comparison is against `ncmoe=32/64` CPU offloading, which is known to be slow for decode. The more relevant baseline is UVM + `cudaMemAdvise` hints, which the paper acknowledges performs closer but doesn't quantify the gap precisely. Readers need to know: is gpu_ext 4.8x better than the worst baseline, or 20% better than the most practical one?
+> **[CRITICAL REVIEW NOTE]** The vLLM framing needs a strategy. gpu_ext matching LMCache sounds incremental. Better framing: the value is TRANSPARENCY (no vLLM code changes, no framework-specific offload, composable with multi-tenant policies that LMCache cannot coordinate). Turns a weak number into an architectural argument. See `critical_review.md` §II Problem 9.
+
 - **vLLM 1.3x**: Compared against `--cpu-offload-gb 8`. The paper itself says this "matches LMCache" -- if gpu_ext matches an existing system paper, this is incremental. Moreover, vLLM's standard operation doesn't use UVM at all; the paper creates a UVM scenario that doesn't reflect typical deployment.
 - **Missing experimental comparison** with Forest (ISCA '25), HELM (SC '25), DREAM (ICS '25), SUV (MICRO '24) -- all cited in S2 as work on UVM policies but never compared against. Even if reimplementation is difficult, the paper should explain why these baselines are excluded and discuss expected relative performance.
 - **GNN**: Uses random graphs, not standard benchmarks (OGB, Reddit). Random graph locality may overstate prefetch benefits.
