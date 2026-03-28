@@ -17,3 +17,6 @@
 	path = workloads/vllm/vllm
 	url = https://github.com/eunomia-bpf/vllm.git
 	branch = uvm
+[submodule "docs/paper"]
+	path = docs/paper
+	url = https://github.com/yunwei37/gbpf-paper
