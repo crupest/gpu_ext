@@ -6,7 +6,8 @@ Based on draft3 discussion. One paragraph at a time, to be finalized incremental
 
 ## P1: Agent + GPU policy importance
 
-As AI agents increasingly explore and optimizing systems[citations: SWE-agent, AutoGPT, LLM-for-systems, agentic coding], GPU resource management policies — memory placement, page migration, eviction ordering, and compute scheduling — have become a critical target for iterative optimization. No single policy fits all scenarios: recent work shows that default UVM placement policies [Forest, HELM, SUV, DREAM] and scheduling policies [GCAPS, GPREEMPT, XSched] perform poorly across workloads and lack multi-tenant coordination. The right policy depends on workload, hardware, and deployment — and model sizes are growing faster than GPU memory, making memory oversubscription and the policies governing it increasingly performance-critical. Under oversubscription, the choice of eviction and prefetch policy can control up to 73% of execution time.
+As AI agents increasingly explore and optimizing systems[citations: SWE-agent, AutoGPT, LLM-for-systems, agentic coding], GPU resource management policies — memory placement, page migration, eviction ordering, and compute scheduling — have become a critical target for iterative optimization. No single policy fits all scenarios — default GPU memory and scheduling policies perform poorly across workloads [Forest, HELM, SUV, DREAM, GCAPS, GPREEMPT, XSched], and the right policy depends on workload, hardware, and deployment. e.g., under oversubscription, the choice of UVM eviction and prefetch policy can control up to 73% of execution time.
+
 
 > **What P1 does:** (1) Agents are exploring GPU policies (with citations to agent systems). (2) GPU policies matter — defaults are bad (with citations to GPU policy papers). (3) Stakes quantified: 73% under oversubscription. All external evidence, no our-own-results.
 >

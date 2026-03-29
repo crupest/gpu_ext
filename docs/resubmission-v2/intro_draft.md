@@ -1,5 +1,4 @@
 # Intro Draft — Round 3 Revision
-
 ## Changes from Round 1 (addressing Round 1 reviewer critique)
 
 Round 1 fixes (carried forward):

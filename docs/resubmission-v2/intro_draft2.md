@@ -1,5 +1,4 @@
 # Intro Draft 2 — Three Boundaries Framing
-
 ## Key difference from intro_draft.md
 
 intro_draft.md uses **two root causes**: timescale mismatch + information mismatch.

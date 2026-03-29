@@ -1,5 +1,4 @@
 # Intro Draft 3 — Agent Motivation + Three Boundaries
-
 ## Evolution
 
 - **Draft 1**: Two root causes (timescale mismatch + information mismatch). Device-side = "additionally." No agent.
