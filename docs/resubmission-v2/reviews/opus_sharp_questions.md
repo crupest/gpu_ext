@@ -99,7 +99,7 @@ The system adds BPF hooks to the GPU fault path. What's the cost when no policy 
 
 **Q18: No finding about agent-discovered policy quality**
 O3/B5 motivates with agents. F2 says 59 configs 0 panics. But did the agent find anything a human wouldn't? If not, say so.
-- Status: FIXED — F2 now says "agent did not discover policies that outperform hand-written ones; the contribution is safe exploration"
+- Status: UPDATED — ALL policies are agent-written (no hand-written baseline). The 2.60x/3.36x/P99 results ARE from agent-generated BPF code. Agent is the policy developer, not a comparator.
 
 **Q19: No observation about open-source driver as enabling condition**
 The entire system depends on NVIDIA's 2022 open-source kernel modules. This explains "why now" — paper couldn't be written in 2020.

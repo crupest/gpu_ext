@@ -67,38 +67,66 @@ All three derive from one root cause: **physical separation across a high-latenc
 
 ### Version 3: Two mismatches + design implications (timescale/information)
 
-Physical separation has two layers:
-- **Interconnect latency** (PCIe/NVLink): high-latency data movement. This is shrinking (PCIe → NVLink → CXL) but nonzero for foreseeable future.
-- **Architectural separation** (independent processor): different ISA (SIMT vs scalar), different execution model (warps vs threads), independent fault handling. This is fundamental and will not disappear even with coherent shared memory (Grace Hopper, AMD MI300X, future CXL GPUs).
+The GPU is a discrete processor with its own ISA and execution model. This is the permanent architectural fact. Two properties of this fact create two mismatches for extensibility:
+
+- **Interconnect latency** (current, shrinking): host and GPU communicate via PCIe/NVLink. Latency is decreasing (PCIe → NVLink → NVLink-C2C → CXL) but data movement remains nonzero for foreseeable future. → creates timescale mismatch.
+- **Architectural distinctness** (permanent): different ISA (SIMT vs scalar), different execution model (warps vs threads), independent fault handling. This does not disappear with faster interconnect or coherent shared memory (Grace Hopper, AMD MI300X). → creates information mismatch.
 
 **Two mismatches (each with clear scope):**
 
-1. **Timescale mismatch** (from interconnect latency): the sync callback model from CPU extensibility works at the fault handler level — BPF programs can make advisory policy decisions (eviction ordering, prefetch scope) synchronously at fault time (L1 baseline). But two temporal limitations remain:
-   - **Too short**: the most impactful effects (cross-block DMA migration, GPU preemption) take ms because data must physically cross the interconnect. The sync callback returns in μs and cannot wait.
-   - **Too late**: the fault handler is reactive (fires after faults). Optimal GPU policy is often proactive: preempt before a latency-critical kernel launch, prefetch before an epoch boundary. The fault handler fires too late for these.
+1. **Timescale mismatch** (from interconnect latency, current-generation): the sync callback model from CPU extensibility works at the fault handler level: BPF programs can make advisory policy decisions (eviction ordering, prefetch scope) synchronously at fault time (L1 baseline). But two temporal limitations remain:
+   - **Too short**: the most impactful effects (cross-block DMA migration, GPU preemption) take ms because data must physically move between host and device memory. The sync callback returns in μs and cannot wait.
+   - **Too late**: the fault handler is reactive (fires after faults). Optimal GPU policy is often proactive: preempt before a latency-critical kernel launch, prefetch before an epoch boundary.
 
-   Because DMA physically moves data across the boundary, every page fault involves both a memory migration decision and a scheduling stall. Memory and scheduling are coupled through the fault handler — unlike CPU where sched_ext and cache_ext operate on largely independent subsystems. This is why hooks must be placed in the fault handler (the memory-scheduling nexus), and why all three mechanism layers (L1/L2/L3) operate at or around this intersection.
+   Because data must be physically moved, every page fault involves both a memory migration decision and a scheduling stall. Memory and scheduling are coupled through the fault handler, unlike CPU where sched_ext and cache_ext operate on largely independent subsystems (the coupling on CPU is at the edges: OOM kills, NUMA balancing). This is why hooks must be placed in the fault handler (the memory-scheduling nexus), and why all three mechanism layers operate at or around this intersection.
 
-   → Mechanism (L1, baseline): sync advisory hooks in fault handler — change eviction/prefetch policy at fault time.
-   → Mechanism (L2, "too short"): async sleepable kfuncs + bpf_wq — initiate DMA/preemption that outlives the callback.
-   → Mechanism (L3, "too late"): uprobes on CUDA APIs — fire before events, enabling proactive policies.
+   This mismatch shrinks as interconnect latency decreases, but remains nonzero as long as explicit data movement is required.
 
-2. **Information mismatch** (from architectural separation): the GPU is an independent processor with its own ISA and execution model. The host cannot observe device execution state (per-warp access patterns, SM utilization, computation phases) without device-side instrumentation. This is not a latency problem — even with zero-latency interconnect, the GPU's internal state is architecturally opaque because the ISA difference makes state uninterpretable without device-side code. This mismatch persists as long as GPUs remain architecturally distinct processors.
+   → Mechanism (L1, baseline): sync advisory hooks in fault handler.
+   → Mechanism (L2, "too short"): async sleepable kfuncs + bpf_wq.
+   → Mechanism (L3, "too late"): uprobes on CUDA APIs.
+
+2. **Information mismatch** (from architectural distinctness, permanent): the GPU is a discrete processor with its own ISA and execution model. The host cannot observe device execution state (per-warp access patterns, SM utilization, computation phases) without device-side instrumentation. Even with zero-latency interconnect and coherent shared memory, the GPU's internal state remains architecturally opaque: the ISA difference means host-side code cannot interpret GPU register files, warp schedulers, or SM execution state. This mismatch persists as long as GPUs remain architecturally distinct processors.
+
    → Mechanism: device-side BPF instrumentation + SIMT-aware verifier.
 
 **What happened to V1's visibility and V2's structural:**
-- Visibility (V1) → folded into information mismatch. It IS the information mismatch (downward direction). Device-side BPF is its mechanism.
-- Structural/resource coupling (V2) → folded into timescale mismatch as design implication. Not independent because it disappears if DMA were instantaneous. Fault handler hook placement is the concrete result.
-- Upward information / app intent (V1, V2) → not GPU-specific (sched_ext has same issue). Not listed as a mismatch. Uprobes are motivated by timescale mismatch ("too late"), not information mismatch.
+- Visibility (V1) → IS the information mismatch. Device-side BPF is its mechanism.
+- Structural/resource coupling (V2) → design implication of timescale mismatch. Not independent (disappears if data movement were instantaneous). Fault handler hook placement is the result.
+- Upward information / app intent (V1, V2) → not GPU-specific (sched_ext has same issue). Uprobes motivated by timescale "too late," not information mismatch.
 
 **Why two is more honest than three:**
-- Each mismatch has a distinct root cause: timescale from interconnect latency, information from architectural separation. Genuinely independent (one can exist without the other).
+- Each mismatch has a distinct root cause: timescale from interconnect latency (current, shrinking), information from architectural distinctness (permanent). Genuinely independent (one can exist without the other).
 - No taxonomy padding: V1 padded visibility ⊂ information, V2 padded structural ⊂ timescale.
-- Upward information (app intent) honestly acknowledged as generic kernel problem, not inflated into GPU-specific mismatch.
+- Timescale mismatch is a current-generation contribution (shrinks with better interconnect). Information mismatch is a permanent contribution (as long as GPUs have different ISA). Honest about longevity.
 - Memory-scheduling coupling preserved as design implication, not lost.
 - Two mismatches motivate three mechanism layers (L1/L2/L3) + device-side BPF, without forcing artificial 1:1 mapping.
 
+**Design principle (derived from the two mismatches):**
+
+A GPU policy framework must jointly consider memory management and compute scheduling. Treating them independently, as CPU extensibility frameworks do (sched_ext for scheduling, cache_ext for page cache), causes cross-subsystem mismatches that degrade performance. Because data must physically move between host and device, every memory decision (which pages to migrate/evict) is simultaneously a scheduling decision (which context stalls/resumes), and vice versa. This is why the hook point must be the fault handler (the memory-scheduling nexus), and why policy programs must see both memory state and scheduling state in a single execution context.
+
+**Experimental support for each claim:**
+
+| Claim | Evidence | Strength |
+|-------|----------|----------|
+| Timescale "too short" (L2 async) | GNN: L1 2.60x → L1+L2 3.36x (+27%) | Strong (one workload) |
+| Timescale "too late" (L3 uprobes) | vLLM: L1+L3 P99 -9.5% | Moderate (one workload, modest effect) |
+| Information (device-side BPF) | Instrumentation with low overhead | Weak (instrumentation only, no end-to-end policy gain) |
+| Memory-scheduling coupling | GNN: eviction policy (memory) affects training throughput (scheduling) | Moderate (indirect) |
+| Agent code generation | ALL 59 policies are agent-written; 2.60x/3.36x/P99 results are from agent code | Strong (agent IS the policy developer, not compared to human baseline) |
+| Limitation at high oversub | llama.cpp 1.84x: L2/L3 negligible, PCIe saturated | Strong (honest negative) |
+
+**Honest assessment:** Our experiments strongly support timescale mismatch (L2 async). They moderately support timescale "too late" (L3 uprobes). They weakly support information mismatch (device-side BPF is instrumentation-only, no end-to-end policy uses it). The memory-scheduling coupling claim is supported indirectly (eviction policy affects scheduling), not by a controlled experiment comparing unified vs separate hooks. ALL performance results (2.60x, 3.36x, P99 -9.5%) are from agent-written BPF policies, demonstrating that agent + gpu_ext produces effective policies end-to-end.
+
+**Gaps between claims and evidence:**
+- No experiment shows addressing BOTH mismatches simultaneously on one workload
+- No experiment compares unified fault-handler hooks vs separate memory/scheduling hooks
+- Device-side BPF has no end-to-end performance result
+
 **Risk:** Two mismatches may feel "less" than three. Counter: SOSP values depth over breadth. Two well-derived mismatches from clear root causes are stronger than three with questionable independence.
+
+[Review: `reviews/opus_review_mismatches_v3.md` — V3 is borderline accept, fix upward info attribution + promote fault-handler nexus]
 
 [Review: `reviews/opus_review_mismatches_v3.md` — V3 is borderline accept, fix upward info attribution + promote fault-handler nexus]
 
@@ -110,7 +138,7 @@ Physical separation has two layers:
 ## Key Findings (discovered by building and evaluating gpu_ext — these validate, not motivate)
 
 1. On GNN training at 1.34x oversubscription, L1 (advisory hooks) achieves 2.60x; L1+L2 (+ async cross-block) reaches 3.36x. On vLLM multi-tenant serving, L1+L3 (+ proactive preemption) reduces P99 by 9.5%. Device-side BPF provides low-overhead instrumentation but is not yet combined with L1+L2 in an end-to-end policy. At 1.84x oversubscription (llama.cpp), L2/L3 provide negligible benefit due to PCIe saturation. [**Weakness (yunwei37):** No single policy uses all three layers together. The capability progression is demonstrated per-mismatch across different workloads, not as a unified L1+L2+L3 stack on one workload. Need a workload/config where all three layers contribute jointly.]
-2. An AI agent generated and deployed 59 BPF policy programs for GPU resource management — eviction ordering, prefetch strategies, scheduling logic — across 4 workloads. This is code generation (BPF programs), not configuration search (parameter tuning), analogous to PolicySmith (BPF CC) and NECC (BPF CCA). The verifier contained all 50 safety-relevant events (invalid memory access, excessive loop bounds) with 0 kernel panics. Hand-written policies matched or exceeded agent-found ones; the agent's value was rapid policy-space coverage with safety guarantees. [**Note:** 0 panics is the expected BPF guarantee; the finding is that this guarantee holds when extended to the GPU driver fault path.]
+2. ALL evaluated policies were generated by an AI agent: 59 BPF policy programs for GPU resource management (eviction ordering, prefetch strategies, scheduling logic) across 4 workloads. This is code generation (BPF programs), not configuration search (parameter tuning), analogous to PolicySmith (BPF CC) and NECC (BPF CCA). The verifier contained all 50 safety-relevant events (invalid memory access, excessive loop bounds) with 0 kernel panics. The performance results in F1 (2.60x, 3.36x, P99 -9.5%) are ALL from agent-written policies. [**Note:** 0 panics is the expected BPF guarantee; the finding is that this guarantee holds when extended to the GPU driver fault path.]
 3. At high oversubscription (1.84x), PCIe bandwidth is the fundamental bottleneck — all prefetch strategies add DMA traffic that competes with demand paging. The system's benefit concentrates at moderate oversubscription (1.1x–1.5x). This bounds the insight: the co-location mismatch is exploitable only when PCIe is not saturated.
 4. Baseline mechanism overhead: BPF hooks on the GPU fault path add <2% overhead when a trivial (no-op) policy is loaded.
 
