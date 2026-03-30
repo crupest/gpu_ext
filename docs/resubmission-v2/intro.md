@@ -19,96 +19,127 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 
 **P1-A: Policy importance only** (Draft 1, 2)
 - "GPU policies matter, diverse workloads, 73%." No agent.
-- ✓ Uncontroversial opening that any GPU-systems reviewer accepts without pushback.
-- ✗ No "why now" hook — could have been written in 2020; doesn't explain why extensibility is timely.
+- ✓ Safe floor option — avoids damage if agent story is weak; any GPU-systems reviewer accepts without pushback.
+- ✗ No "why now" — could have been written in 2020; gives reviewer no reason to distinguish this from the 15 UVM/scheduling papers already published (Forest, HELM, SUV, DREAM, GCAPS, GPREEMPT, XSched).
+- ✗ Motivates "better policies" but not "extensibility" specifically — every paper in the related work also claims better policies.
 
 **P1-B: Agent as full P1** (Draft 3)
 - "AI agents are exploring GPU policies... 59 configs, 75% fail... needs safe extensibility."
-- ✓ Vivid and concrete — reader immediately understands the iteration loop and why safety matters.
-- ✗ The 59-config / 75%-fail data is entirely our own, with no external citation; a reviewer may say "this is your system's eval, not a general trend."
+- ✓ The only option that naturally motivates ALL THREE design requirements (safety, dynamism, fast iteration) from a single concrete use case rather than asserting them.
+- ✓ Provides "why now" — GPU extensibility could only be written in 2026, not 2020, because agents + open-source GPU drivers are both new.
+- ✗ 59 configs / 75% fail is a methodology artifact from our own development, not a general observation — a reviewer says "this is anecdotal evidence dressed as empirical data; 75% failure rate is meaningless without knowing the search strategy."
+- ✗ Creates framing debt: reviewer will expect rigorous agent evaluation (ablation, comparison to Bayesian optimization, agent architecture), not just "59 configs 0 panics" in the eval. If Section 5 is primarily workload benchmarks with manually-written BPF programs, the reader feels baited.
 
 **P1-C: Policy + agent in one sentence** (Current tex)
 - "GPU policies have large impact, and AI agents are actively optimizing such policies across the stack."
-- ✓ Compact — establishes both themes in one paragraph without over-committing to either.
-- ✗ Agent is mentioned once and then disappears until P6; opus called this "a Chekhov's gun that fires once in a throwaway sentence."
+- ✓ Compact — establishes both themes without over-committing to either.
+- ✗ **Strictly dominated** — pays the cost of mentioning agents (inviting "AI for systems" reviewer expectations) without getting the benefit (natural motivation for safety/dynamism/iteration). Either commit (P1-B) or drop (P1-A); half-measures are worse than either extreme.
+- ✗ Creates tonal mismatch — P1 says "agents actively optimizing" but P2-P5 never mention agents again until one sentence in eval. Reader experiences disconnect between marketing and substance.
 
 ### P2 options: What's the problem?
 
 **P2-A: "Locked in driver"** (Draft 1, 2)
 - "Policy controls 73% of time, yet implementing any new policy requires modifying the proprietary driver."
-- ✓ Creates sharp tension between high impact and zero programmability in one sentence.
-- ✗ This is a complaint about vendor practice, not an architectural insight — a reviewer says "so convince NVIDIA to open-source the driver."
+- ✓ Creates sharp tension between high impact and zero programmability; most honest if the contribution is primarily engineering.
+- ✗ A complaint about vendor practice, not an architectural insight — reviewer says "so convince NVIDIA to open-source the driver" (they already have).
+- ✗ Doesn't distinguish from other "make X extensible" papers — "X is important but not extensible" is the generic template for every eBPF paper.
 
 **P2-B: "Co-location breaks"** (Framing 4)
 - "Unlike CPU where policy/information/effect co-located, GPU spans a physical boundary via PCIe."
-- ✓ The deepest insight — contrastive with CPU extensibility, explains WHY struct_ops fails, predictive for any PCIe/CXL accelerator.
-- ✗ If placed in P2 before any evidence, it reads as an assertion the reader has no reason to believe; the co-location argument is more convincing AFTER seeing +27%/P99 data.
+- ✓ Deepest insight — contrastive with CPU extensibility, explains WHY struct_ops fails, predictive for any PCIe/CXL accelerator. The only framing that makes the paper about more than GPUs.
+- ✗ Demands reader familiarity with sched_ext/cache_ext internals; if the reader doesn't know how those work, the comparison falls flat.
+- ✗ CPU scheduling is not perfectly co-located either (NUMA, remote memory) — reviewer can argue the difference is quantitative (μs vs ms), not qualitative. You must defend why 1000x gap is qualitatively different.
 
 **P2-C: "Expressiveness wall"** (Framing 5)
 - "Physical separation limits which policies can be expressed, not just how they execute."
-- ✓ The "not just how but which" distinction is sharp and connects directly to the agent story (agents limited by interface, not by search quality).
-- ✗ "Expressiveness" is our own concept, not a standard systems term — we cannot formally prove that certain policies are inexpressible vs merely difficult to implement.
+- ✓ Connects directly to agent story (agents limited by interface, not search quality); most natural P2 partner for P1-B.
+- ✗ "Expressiveness" has a precise meaning in PL (language expressiveness relative to formal model) — a PL-literate reviewer will note you're using it loosely.
+- ✗ You show synchronous callbacks are *inconvenient* for cross-block prefetch, not *inexpressible* — a sufficiently rich return type (DMA descriptor list) might express it. The real claim is that execution strategy is policy-dependent, which is weaker than inexpressibility.
+- ✗ "Wall" implies a cliff, but data shows a slope (L1=2.60x, L2=3.29x, L3=more). No discontinuity.
 
 **P2-D: "Cross-layer fragmentation"** (Framing 6)
 - "Effective GPU policy requires information and control that no single layer possesses."
-- ✓ Correctly identifies that policy is scattered (not just in driver) and explains why every single-layer approach fails.
-- ✗ "Systems are fragmented across layers" applies to networking, storage, and every other stack — a reviewer asks "what's GPU-specific?" and the answer ("PCIe") isn't in this framing.
+- ✓ Most architecturally honest — correctly identifies policy is scattered, not just in driver.
+- ✗ Generic — applies to networking (app/socket/TC/NIC), storage (app/FS/block/FTL), every layered system. What's GPU-specific?
+- ✗ Contradicts the paper's own design: gpu_ext is a driver-centric system with uprobes and device BPF as extensions, not a genuinely cross-layer framework. "Cross-layer" rhetoric oversells.
 
 **P2-E: "Driver not extensible"** (Framing 7, 8)
 - "The GPU driver is the only component with visibility + privilege + fault path — yet its policies remain hardcoded."
-- ✓ Honest and unattackable — this is simply a true statement about the current state of GPU drivers.
-- ✗ SOSP expects insight beyond "X hasn't been done"; a reviewer writes "the contribution is engineering — you just applied the sched_ext pattern to a new subsystem."
+- ✓ Honest, unattackable, sets correct expectations if the paper is positioned as systems-building (like Bento or XRP).
+- ✗ Invites "just apply sched_ext" dismissal — if the problem is "driver not extensible" and sched_ext showed how to make kernel subsystems extensible, the contribution is "known pattern applied to new domain."
 
 **P2-F: "Requirements + tradeoff"** (Current tex before latest edit)
 - "Safe iterative exploration requires deployability, visibility, containment. No existing approach provides all three."
-- ✓ Enumerates concrete requirements and uses them to organize the critique of existing approaches.
-- ✗ The three requirements (deployability, visibility, containment) appear from nowhere — they aren't derived from the architecture, making the list feel arbitrary and checklist-like.
+- ✓ Best framing for organizing a related-work comparison table (define axes, show gaps).
+- ✗ Requirements are post-hoc — designed so only your system satisfies them. Reviewer asks "if I add module hot-reload to Forest, does it satisfy deployability?"
+- ✗ "Requirements list" is a red flag signaling "we designed a checklist and checked it off" rather than discovering something surprising.
 
 **P2-G: "Architectural barrier"** (Current tex latest edit)
 - "Policy must be driver-resident (visibility, privilege, fault path). But GPU is separate processor via PCIe — driver separated from effects in time, space, context. Limits expressiveness. Agents confined."
-- ✓ Derives WHY driver is the coordination point, explains physical separation, connects to agents — the most complete version.
-- ✗ Packs four distinct arguments (why driver, physical separation, expressiveness, agent confinement) into one paragraph, making it dense and hard to parse on first read.
+- ✓ Most complete — derives WHY driver, explains physical separation, connects to agents.
+- ✗ Four arguments (why driver, physical separation, expressiveness, agent confinement) in one paragraph. No single argument gets enough space to land. Reader processes four claims in rapid succession and retains none.
+- ✓ **Best candidate for splitting into two paragraphs** — first derives "why driver," second explains "physical separation limits expressiveness."
+
+**P2-H: "Impedance mismatch between policy timescales"** (NEW, suggested by opus)
+- "GPU resource management operates at multiple timescales simultaneously (μs fault handling, ms migration, s-level scheduling), and any single-timescale interface sacrifices performance at the others."
+- ✓ More precise than co-location — focuses on the specific technical mechanism that breaks synchronous callbacks.
+- ✗ Only captures the timescale dimension; doesn't explain information mismatch (app intent) or visibility mismatch (device state).
+
+**P2-I: "GPU lacks extensibility other Linux subsystems have"** (NEW, suggested by opus)
+- "Linux has made CPU scheduling (sched_ext), page cache (cache_ext), storage (XRP), networking (XDP/TC) extensible — but GPU, the most economically important subsystem, has no extensibility story."
+- ✓ Positions paper as filling an obvious gap in a well-established Linux research program; attractive to eBPF/Linux PC members.
+- ✗ Frames the contribution as "gap-filling" which is weaker than "architectural insight"; reviewer may say "the gap is obvious, what's the research?"
 
 ### P3 options: What's the starting point?
 
 **P3-A: Existing approaches → our insight** (Draft 1)
 - "User-space, driver mods, advisory eBPF all insufficient. Even richer callbacks would require fixed async engine."
-- ✓ The "richer callback" rebuttal anticipates the obvious reviewer objection ("just return DMA descriptors") and closes it.
-- ✗ Treats struct_ops as previous work being criticized, when it's actually our own system's L1 baseline.
+- ✓ The "richer callback" rebuttal anticipates the obvious reviewer objection ("just return DMA descriptors") and closes it preemptively.
+- ✗ Treats struct_ops as previous work being criticized — dishonest when the eval shows "L1: struct_ops advisory hooks (our system)." Reviewer who reads eval will feel deceived.
 
 **P3-B: struct_ops = our starting point** (Draft 3, Current tex)
 - "eBPF struct_ops proven for CPU. We adopt synchronous advisory hooks as our starting point."
-- ✓ Correctly positions struct_ops as OUR contribution's foundation, not someone else's failed attempt.
-- ✗ Defers the "why insufficient" argument entirely to the next paragraph — reader may wonder why you're adopting something you're about to say is broken.
+- ✓ Correctly positions struct_ops as OUR foundation; the "we adopt it → but it's not enough" handoff to P3b/P4 is clean and follows the proven pattern of incremental design justification.
+- ✗ Loses the "richer callback" rebuttal from P3-A — reviewer can still ask "why not just return DMA descriptors?" and the intro doesn't preempt this.
+- ✗ Transition must be very tight — any gap between "we adopt" and "it's insufficient" makes reader wonder why you adopted something broken.
 
-**P3 is mostly settled:** P3-B with existing approaches as supporting detail.
+**P3 is mostly settled:** P3-B with existing approaches as supporting detail. Consider adding one sentence from P3-A's "richer callback" rebuttal to close the obvious counter-argument.
 
 ### P4 options: What's the insight?
 
 **P4-A: Two root causes** (Draft 1)
 - "Timescale mismatch + information mismatch."
-- ✓ Sharp, memorable names that a reviewer can reference in discussion; each maps cleanly to a mechanism.
-- ✗ Covers only sync/async and driver/app — device-side (host/device boundary) is absent, making it appear bolted on when introduced later as "additionally."
+- ✓ Sharp, memorable names; simplest option — two things to remember is better than three. More honest if device-side evidence is thin.
+- ✗ Two root causes for three mechanisms means one mechanism (device BPF) is unmotivated — will feel bolted on in eval.
+- ✗ "Information mismatch" conflates two genuinely different gaps: driver↔app (vertical, between layers) and host↔device (horizontal, across PCIe). These have different mechanisms, overheads, and evidence.
 
 **P4-B: Three boundaries** (Draft 2, 3)
 - "Three execution boundaries: sync/async, driver/app, host/device."
-- ✓ Complete — device-side is integral from the start; clean 3-boundary → 3-mechanism mapping.
-- ✗ Opus critique: "listing three things is classification, not insight" — the boundaries are described independently without a unifying causal principle explaining why they arise.
+- ✓ Complete, clean 3→3 mapping; makes the paper easy to structure (each section = one boundary).
+- ✗ Three independently described boundaries without a unifying principle — reads as "three things that are hard about GPUs" rather than one deep insight with three manifestations.
+- ✗ Vulnerable to "taxonomy" dismissal: "The authors classify challenges into three categories. While correct, this classification does not constitute a contribution." Must prove boundaries are *surprising* (not obvious), *necessary* (can't solve without all three), and *sufficient* (all three does solve it).
 
 **P4-C: Co-location as root cause** (Framing 4)
 - "GPU is PCIe-connected accelerator → breaks co-location assumption → three mismatches."
-- ✓ Provides the causal principle that P4-B lacks: all three mismatches arise from one root cause (physical separation via PCIe), making the decomposition feel principled rather than ad-hoc.
-- ✗ The co-location argument is abstract and needs concrete evidence to land; works well AFTER empirical data (+27%, P99 gap) but feels asserted if placed before evidence.
+- ✓ The most publishable insight — provides the causal principle that P4-B lacks; the sentence a championing reviewer will quote: "physical separation between host and accelerator breaks the co-location assumption underlying existing kernel extensibility frameworks."
+- ✗ Needs evidence to land — works after +27%/P99 data, feels asserted before it.
+- ✗ Claims generalization to all PCIe/CXL accelerators but paper tests only NVIDIA GPUs — reviewer says "speculative generalization."
 
 **P4-D: Discovery** (Framing 7)
 - "We applied eBPF, measured +27%/P99 gap, found three root causes from physical separation."
-- ✓ Matches our actual methodology — evidence first, explanation second; avoids claiming we derived the design from first principles.
-- ✗ SOSP reviewers prefer principled design to post-hoc rationalization; "we tried and found" reads as trial-and-error rather than architectural reasoning.
+- ✓ Most honest and most credible for the agent story ("here is what the agent and we found").
+- ✗ "We tried and found" confuses methodology with contribution — SOSP papers present understanding gained, not process followed.
+- ✗ Undermines completeness: "Are there more mismatches you haven't discovered? Is the list complete, or just what you happened to encounter?" P4-C answers completeness; P4-D cannot.
 
 **P4-E: Expressiveness dimensions** (Framing 5)
 - "Three mismatches = three dimensions of the expressiveness wall."
-- ✓ Ties the three mismatches back to the agent story — each mismatch is a dimension along which the synchronous interface truncates the reachable policy space.
-- ✗ "Expressiveness wall" is a metaphor we invented, not a measurable property — a reviewer can dismiss it as rhetorical framing rather than technical substance.
+- ✓ Ties mismatches to agent story — each dimension truncates the reachable policy space.
+- ✗ Vulnerable to "rebuttal by construction": reviewer proposes a single rich callback returning a struct with DMA descriptors + uprobe requests + device bytecode — technically synchronous and single-layer. Your counter is that such a callback pushes all policy into the return type, making the driver a general-purpose interpreter (i.e., your system by another name). But P4-E as stated doesn't make this counter.
+
+**P4-F: "One insight, three manifestations"** (NEW, suggested by opus)
+- "Physical separation is one root cause. Three mismatches are its necessary consequences: when policy and effect are separated by a high-latency interconnect, the interface must provide async execution, cross-boundary information relay, and remote observation."
+- ✓ P4-C done right — single causal principle with three derived requirements, not three independent observations. Most principled and most defensible.
+- ✗ Requires tight writing to avoid feeling like P4-C restated. The "derived requirements" must feel like logical consequences, not just a relabeled list.
 
 ### P5-P7: Stable across all framings
 
@@ -124,34 +155,36 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 
 | | Insight depth | Agent fit | Honesty | SOSP risk |
 |--|--------------|-----------|---------|-----------|
-| P2-A "locked" | Low | None | High | "complaint" |
-| P2-B "co-location" | High | Medium | High | "abstract, asserted" |
-| P2-C "expressiveness" | High | Strong | Medium | "not provable" |
-| P2-D "cross-layer" | Medium | Medium | Low | "descriptive, oversells" |
-| P2-E "not extensible" | Low | Medium | Highest | "engineering" |
-| P2-F "requirements" | Low | Strong | Medium | "arbitrary list" |
-| P2-G "architectural" | High | Strong | High | "too much in one para" |
+| P2-A "locked" | Low | None | High | "complaint, not insight" |
+| P2-B "co-location" | High | Medium | High | "abstract, demands sched_ext knowledge" |
+| P2-C "expressiveness" | Medium-High | Strong | Medium | "loose PL term, slope not cliff" |
+| P2-D "cross-layer" | Medium | Medium | Low | "generic, oversells design" |
+| P2-E "not extensible" | Low | Medium | Highest | "engineering, just apply sched_ext" |
+| P2-F "requirements" | Low | Strong | Medium | "post-hoc checklist, straw man risk" |
+| P2-G "architectural" | High | Strong | High | "too dense; **split into two paras**" |
+| P2-H "timescale impedance" | Medium-High | Low | High | "only captures one dimension" |
+| P2-I "extensibility gap" | Medium | Low | High | "gap-filling, obvious" |
 | | | | | |
-| P4-A "two causes" | Medium | None | High | "incomplete" |
-| P4-B "three boundaries" | Medium | None | High | "taxonomy" |
-| P4-C "co-location root cause" | High | Medium | High | "abstract" |
-| P4-D "discovery" | Medium | Medium | Highest | "trial-and-error" |
-| P4-E "expressiveness dims" | High | Strong | Medium | "metaphor" |
+| P4-A "two causes" | Medium | None | High | "incomplete, conflates two gaps" |
+| P4-B "three boundaries" | Medium | None | High | "taxonomy without principle" |
+| P4-C "co-location root" | High | Medium | High | "speculative generalization" |
+| P4-D "discovery" | Medium | Strong | Highest | "trial-and-error, completeness?" |
+| P4-E "expressiveness dims" | Medium-High | Strong | Medium | "rebuttal by construction" |
+| P4-F "one insight three manifestations" | High | Medium | High | "must feel derived not relabeled" |
 
 ---
 
-## Synthesis: Recommended combination
+## Synthesis: Opus-recommended combination
 
-No single framing suffices. Combine:
+**P1-B** (agent as full P1, but trimmed — 3 sentences establishing use case, not a full agent paragraph) + **P2-G split into two paragraphs** (first: why driver is the right place; second: physical separation limits expressiveness) + **P4-F** (one root cause → three derived manifestations, after evidence in P3b).
 
-- **P1**: Agent + policy importance (Framing 3)
-- **P2**: Driver policies not extensible + WHY driver is right place (Framing 8, derived)
-- **P3**: eBPF as starting point
-- **P4**: Evidence first (Framing 7) + co-location as root cause (Framing 4): "we applied eBPF, measured gap, found three mismatches from physical separation"
-- **P5**: One mechanism per mismatch
-- **P6**: Capability progression + agent validation (Framing 3 + 5)
+Reasoning:
+- P1-B provides "why now" (agents + open-source GPU drivers are both new in 2026); P1-A was writable in 2020.
+- P2-G split gives the deepest problem statement without density; the co-location insight is earned, not front-loaded.
+- P4-F is the most principled insight — single causal root (physical separation via PCIe) with three necessary consequences.
+- P1-B's framing debt (agent eval expectations) is payable: 59 configs, 50 safety events, 0 panics is a respectable case study.
 
-**Key principle:** Evidence before explanation. Discovery before derivation.
+**Key principle:** Evidence before explanation. Discovery before derivation. Honest about what we found, not what we "argue."
 
 ---
 
