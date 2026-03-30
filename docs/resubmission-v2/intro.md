@@ -1,18 +1,118 @@
 # GPU_ext Intro: Framings, Analysis & Plan
 
-## Key Observations (what we see)
+## Background (the big picture)
 
-1. GPU resource management policies have large, workload-dependent performance impact (up to 73% of execution time).
-2. The GPU driver is the only layer with global visibility, hardware privilege and cross-tenant authority — the only viable coordination point for policy.
-3. Synchronous advisory hooks (struct_ops L1) achieve 2.60x, but async (L2) adds +27% and proactive (L3) further reduces P99 — each layer adds non-redundant value.
-4. AI agents are actively exploring system-level policies, and GPU is a high-value target but lacks a safe, deployable OS interface for such exploration.
-5. SIMT execution on GPU requires distinguishing warp-uniform from lane-varying values — a standard eBPF verifier cannot ensure safety on GPU hardware.
+1. GPUs are a primary compute platform for AI. Models increasingly exceed VRAM, making OS-level resource management (migration, scheduling, sharing) critical.
+2. GPU hardware provides resource management mechanisms (MMU, TLB, fault queues, timeslice scheduler) but delegates resource management *policy* to software — no hardware page replacement policy, no hardware scheduling policy. Policy lives in the kernel driver and across the software stack.
+3. Linux has made CPU scheduling (sched_ext), networking (XDP/TC), and storage (XRP) extensible via eBPF — but GPU has no extensibility story.
+4. NVIDIA open-sourced its kernel-mode GPU driver modules (including UVM) in 2022, making driver-level extensibility feasible for the first time.
+5. AI agents are evolving from configuration tuners to code writers — SchedCP generates BPF scheduling programs (not configs) via sched_ext, AlphaEvolve writes TPU layout code, ASAP tunes LLM training configs. As agents become capable of writing policy code, they need a **programmable** interface (not just fixed knobs) with safety guarantees (verified, sandboxed). [See `agent_systems_survey.md`, `agent_gpu_citations.md`.]
 
-## Key Insights (why it's so)
+## Key Observations (specific facts that motivate the work)
 
-1. GPU is a separate processor across PCIe — this physical separation breaks the co-location assumption (policy, information, effect in one context) that makes CPU extensibility frameworks (sched_ext, cache_ext) work.
-2. Three mismatches (timescale, information, visibility) are derived consequences of physical separation, not independent problems — each requires a distinct mechanism to cross.
-3. No single-layer callback model can express the policies that account for the +27% and P99 gains — the interface, not the search, is the bottleneck.
+1. GPU resource management policies have large, workload-dependent performance impact — external measurements show 3.5x speedup from prefetch policy (HELM), 43.7% stall reduction from scheduling policy (MOST), 93% speedup from memory placement (Ganguly). No single policy works across workloads. [See `gpu_policy_impact_evidence.md`.]
+2. The GPU driver is the best-positioned coordination point for policy — on bare-metal, the primary software-accessible layer with global visibility across processes, hardware privilege over page tables and scheduling, and fault path access. Policy is scattered across the stack, but no other layer can coordinate across all of them.
+
+## Problem statement (the gap)
+
+No general-purpose, programmable OS extensibility interface exists for GPU resource management policy — a gap that grows more critical as AI agents evolve from configuration tuners to policy code writers. Existing interfaces (cudaMemAdvise, MPS priority, MIG partitioning) expose fixed knobs: agents can search over them, but cannot express new policies. User-space frameworks offer programmability but lack kernel-level visibility and privilege. Kernel driver modifications provide both, but are fragile, vendor-specific, and unsafe for agent-generated code. The result: agents can write arbitrarily sophisticated policy logic, but have nowhere safe to run it at the driver level where GPU policy lives.
+
+## Key Insights — Mismatch Versions
+
+### Version 1: Three mismatches (original, timescale/information/visibility)
+
+1. The policy executor (host CPU in the driver) and the managed resource (device memory, GPU execution) are on opposite sides of a high-latency, low-bandwidth interconnect (PCIe) with no shared observability. This breaks the co-location assumption — policy, information, and effect in one execution context — that underlies CPU extensibility frameworks (sched_ext, cache_ext). Unlike NUMA (same processor, shared address space, ~2-3x latency), GPU separation is qualitative: different processor, different address space, requiring explicit DMA to effect any policy decision.
+2. Because physical separation places the policy executor and the managed resource in different timescales, different information contexts, and different observability domains, a synchronous, driver-local callback cannot cross any of the resulting mismatches: it returns before DMA completes (timescale), the driver lacks upcall paths to application intent (information), and the host has no runtime visibility into GPU SMs (visibility). The interface, not the search, is the bottleneck. The co-location mismatch is real but its exploitability is bounded by PCIe bandwidth — at high oversubscription, crossing more boundaries yields no gain because the interconnect is saturated (see F3).
+
+[Review: `reviews/opus_sharp_questions.md` Q7/Q8 — "why exactly three? taxonomy not insight? visibility ⊂ information?"]
+
+### Version 2: Three mismatches revised (timescale/information-bidirectional/structural)
+
+Previous version had: timescale, information, visibility. Two problems identified:
+- Visibility (host can't observe device) is really the downward direction of information asymmetry, not a separate mismatch
+- Memory-scheduling coupling on GPU is a real mismatch not captured
+
+All three derive from one root cause: **physical separation across a high-latency interconnect.**
+
+**Revised three mismatches:**
+
+1. **Timescale mismatch** (temporal): policy decision must return in μs (fault-handler context), but the most impactful effects (cross-block DMA migration, GPU preemption) take ms. A synchronous callback cannot initiate these and wait. Root cause: effects must cross the interconnect.
+   → Mechanism: async sleepable kfuncs + bpf_wq.
+
+2. **Information mismatch** (spatial, bidirectional): the driver lacks application intent from above (what kernel to launch, when epochs end) AND device execution state from below (per-warp access patterns, SM utilization, computation phases). The two directions cross different boundaries and require distinct mechanisms. Root cause: boundary separates app, driver, and device into isolated information domains.
+   → Mechanism (upward): uprobes on application APIs.
+   → Mechanism (downward): device-side BPF instrumentation.
+
+3. **Structural mismatch** (cross-subsystem): on CPU, scheduling and memory management are largely independent subsystems with separate extensibility interfaces (sched_ext vs cache_ext); the hardware page walker transparently handles TLB misses without software coordination. On GPU, memory must be physically moved across the interconnect (DMA), not just mapped. Every page fault involves both a memory migration decision and a scheduling stall. Eviction policy needs scheduling priority; scheduling policy needs memory pressure. The per-subsystem extensibility model that works for CPU breaks here. Root cause: if memory didn't need to cross the boundary, scheduling and memory could be largely independent as on CPU.
+   → Mechanism: hooks in the GPU fault handler, which is inherently the intersection of memory and scheduling. The same BPF program at the eviction/fault hook receives both memory state (page location, fault counts) and scheduling state (process priority, context activity), enabling cross-cutting policies that separate per-subsystem hooks cannot express.
+
+**Why this is better than the old three:**
+- All three derive from physical separation (causal unity preserved):
+  - Timescale: effects cross the interconnect (temporal)
+  - Information: boundary creates isolated information domains (spatial)
+  - Structural: memory must physically move, coupling scheduling and memory (structural)
+- Visibility is no longer inflated into a separate mismatch; it's the downward direction of information, with device-side BPF as its dedicated mechanism
+- Structural mismatch is a genuinely GPU-specific insight: the per-subsystem extensibility model that works for CPU (sched_ext independent of cache_ext) breaks for GPU. The insight is not that memory and scheduling are coupled (obvious), but that this coupling invalidates the extensibility design pattern
+- Q7 ("why exactly three?") answered: timescale = temporal, information = spatial, structural = cross-subsystem. Three orthogonal dimensions of how physical separation affects the extensibility interface
+
+**Addressing opus reviewer concerns from previous round:**
+- "(a) loses device-side BPF motivation": FIXED — device-side BPF is explicitly the downward mechanism under information mismatch, with its own arrow (→). It remains first-class.
+- "(b) unified interface is not a concrete mechanism": FIXED — mechanism is now "hooks in the GPU fault handler" (a specific placement), not "shared maps" (generic BPF feature). The fault handler is inherently at the memory-scheduling intersection; this is not something you get by just sharing BPF maps across arbitrary hooks.
+- "(c) resource coupling is obvious": PARTIALLY FIXED — reframed as "the per-subsystem extensibility model breaks" (non-obvious to eBPF/Linux community), not "memory and scheduling are coupled" (obvious). Softened CPU claim to "largely independent" with qualifier about OOM/NUMA edge cases.
+- "(d) CPU sched and memory not fully independent": FIXED — "largely independent" + "on CPU, the coupling is at the edges (OOM kills, NUMA balancing); on GPU, it is fundamental: every page fault involves both a memory migration decision and a scheduling stall."
+
+**Remaining risk:** Does "structural mismatch" carry the same rhetorical weight as the other two? Timescale and information are sharp, memorable names. "Structural" is more abstract. Alternative names considered: resource coupling mismatch, independence mismatch, subsystem entanglement. "Structural" chosen because it describes what breaks (the structure of the extensibility interface), not just what exists (coupling).
+
+[Review: `reviews/opus_review_mismatches_v2.md` — structural is corollary of timescale (not independent), upward information is software layering (not physical separation), honest count is two]
+
+### Version 3: Two mismatches + design implications (timescale/information)
+
+Physical separation has two layers:
+- **Interconnect latency** (PCIe/NVLink): high-latency data movement. This is shrinking (PCIe → NVLink → CXL) but nonzero for foreseeable future.
+- **Architectural separation** (independent processor): different ISA (SIMT vs scalar), different execution model (warps vs threads), independent fault handling. This is fundamental and will not disappear even with coherent shared memory (Grace Hopper, AMD MI300X, future CXL GPUs).
+
+**Two mismatches (each with clear scope):**
+
+1. **Timescale mismatch** (from interconnect latency): the sync callback model from CPU extensibility works at the fault handler level — BPF programs can make advisory policy decisions (eviction ordering, prefetch scope) synchronously at fault time (L1 baseline). But two temporal limitations remain:
+   - **Too short**: the most impactful effects (cross-block DMA migration, GPU preemption) take ms because data must physically cross the interconnect. The sync callback returns in μs and cannot wait.
+   - **Too late**: the fault handler is reactive (fires after faults). Optimal GPU policy is often proactive: preempt before a latency-critical kernel launch, prefetch before an epoch boundary. The fault handler fires too late for these.
+
+   Because DMA physically moves data across the boundary, every page fault involves both a memory migration decision and a scheduling stall. Memory and scheduling are coupled through the fault handler — unlike CPU where sched_ext and cache_ext operate on largely independent subsystems. This is why hooks must be placed in the fault handler (the memory-scheduling nexus), and why all three mechanism layers (L1/L2/L3) operate at or around this intersection.
+
+   → Mechanism (L1, baseline): sync advisory hooks in fault handler — change eviction/prefetch policy at fault time.
+   → Mechanism (L2, "too short"): async sleepable kfuncs + bpf_wq — initiate DMA/preemption that outlives the callback.
+   → Mechanism (L3, "too late"): uprobes on CUDA APIs — fire before events, enabling proactive policies.
+
+2. **Information mismatch** (from architectural separation): the GPU is an independent processor with its own ISA and execution model. The host cannot observe device execution state (per-warp access patterns, SM utilization, computation phases) without device-side instrumentation. This is not a latency problem — even with zero-latency interconnect, the GPU's internal state is architecturally opaque because the ISA difference makes state uninterpretable without device-side code. This mismatch persists as long as GPUs remain architecturally distinct processors.
+   → Mechanism: device-side BPF instrumentation + SIMT-aware verifier.
+
+**What happened to V1's visibility and V2's structural:**
+- Visibility (V1) → folded into information mismatch. It IS the information mismatch (downward direction). Device-side BPF is its mechanism.
+- Structural/resource coupling (V2) → folded into timescale mismatch as design implication. Not independent because it disappears if DMA were instantaneous. Fault handler hook placement is the concrete result.
+- Upward information / app intent (V1, V2) → not GPU-specific (sched_ext has same issue). Not listed as a mismatch. Uprobes are motivated by timescale mismatch ("too late"), not information mismatch.
+
+**Why two is more honest than three:**
+- Each mismatch has a distinct root cause: timescale from interconnect latency, information from architectural separation. Genuinely independent (one can exist without the other).
+- No taxonomy padding: V1 padded visibility ⊂ information, V2 padded structural ⊂ timescale.
+- Upward information (app intent) honestly acknowledged as generic kernel problem, not inflated into GPU-specific mismatch.
+- Memory-scheduling coupling preserved as design implication, not lost.
+- Two mismatches motivate three mechanism layers (L1/L2/L3) + device-side BPF, without forcing artificial 1:1 mapping.
+
+**Risk:** Two mismatches may feel "less" than three. Counter: SOSP values depth over breadth. Two well-derived mismatches from clear root causes are stronger than three with questionable independence.
+
+[Review: `reviews/opus_review_mismatches_v3.md` — V3 is borderline accept, fix upward info attribution + promote fault-handler nexus]
+
+## Design Constraints (these shape the implementation)
+
+1. SIMT execution on GPU requires distinguishing warp-uniform from lane-varying values — a standard eBPF verifier ensures memory safety and termination but cannot prevent warp-divergence deadlocks.
+2. Existing CPU extensibility patterns (sched_ext, cache_ext) cannot be directly reused — each mechanism requires GPU-specific adaptation due to the qualitative differences in execution model, address space, and interconnect latency.
+
+## Key Findings (discovered by building and evaluating gpu_ext — these validate, not motivate)
+
+1. On GNN training at 1.34x oversubscription, L1 (advisory hooks) achieves 2.60x; L1+L2 (+ async cross-block) reaches 3.36x. On vLLM multi-tenant serving, L1+L3 (+ proactive preemption) reduces P99 by 9.5%. Device-side BPF provides low-overhead instrumentation but is not yet combined with L1+L2 in an end-to-end policy. At 1.84x oversubscription (llama.cpp), L2/L3 provide negligible benefit due to PCIe saturation. [**Weakness (yunwei37):** No single policy uses all three layers together. The capability progression is demonstrated per-mismatch across different workloads, not as a unified L1+L2+L3 stack on one workload. Need a workload/config where all three layers contribute jointly.]
+2. An AI agent generated and deployed 59 BPF policy programs for GPU resource management — eviction ordering, prefetch strategies, scheduling logic — across 4 workloads. This is code generation (BPF programs), not configuration search (parameter tuning), analogous to PolicySmith (BPF CC) and NECC (BPF CCA). The verifier contained all 50 safety-relevant events (invalid memory access, excessive loop bounds) with 0 kernel panics. Hand-written policies matched or exceeded agent-found ones; the agent's value was rapid policy-space coverage with safety guarantees. [**Note:** 0 panics is the expected BPF guarantee; the finding is that this guarantee holds when extended to the GPU driver fault path.]
+3. At high oversubscription (1.84x), PCIe bandwidth is the fundamental bottleneck — all prefetch strategies add DMA traffic that competes with demand paging. The system's benefit concentrates at moderate oversubscription (1.1x–1.5x). This bounds the insight: the co-location mismatch is exploitable only when PCIe is not saturated.
+4. Baseline mechanism overhead: BPF hooks on the GPU fault path add <2% overhead when a trivial (no-op) policy is loaded.
 
 ---
 
@@ -42,111 +142,139 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 - ✗ If agent threads through P2-P6 (as the throughline table suggests), P1-C under-leverages the agent story. If agents disappear after P1, creates tonal mismatch. Outcome depends on how consistently agent appears in subsequent paragraphs.
 - ✗ Compared to P1-B, gives up the natural motivation for safety/dynamism/iteration from a single use case — these must be motivated separately.
 
-### P2 options: What's the problem?
+### P2 options: What's the practical problem? (NOT insight — insight goes in P4)
 
 **P2-A: "Locked in driver"** (Draft 1, 2)
 - "Policy controls 73% of time, yet implementing any new policy requires modifying the proprietary driver."
-- ✓ Creates sharp tension between high impact and zero programmability; most honest if the contribution is primarily engineering.
-- ✗ A complaint about vendor practice, not an architectural insight — reviewer says "so convince NVIDIA to open-source the driver" (they already have).
-- ✗ Doesn't distinguish from other "make X extensible" papers — "X is important but not extensible" is the generic template for every eBPF paper.
-
-**P2-B: "Co-location breaks"** (Framing 4)
-- "Unlike CPU where policy/information/effect co-located, GPU spans a physical boundary via PCIe."
-- ✓ Deepest insight — contrastive with CPU extensibility, explains WHY struct_ops fails, predictive for any PCIe/CXL accelerator. The only framing that makes the paper about more than GPUs.
-- ✗ Demands reader familiarity with sched_ext/cache_ext internals; if the reader doesn't know how those work, the comparison falls flat.
-- ✗ NUMA counter: CPU scheduling involves remote memory with variable latency. However, this counter is **easy to defend** — NUMA is the same processor with ~2-3x latency variation; GPU is a different processor, different ISA, different address space, different execution model, across PCIe with 1000x latency gap. The difference is qualitative (separate processor), not just quantitative (longer latency).
-
-**P2-C: "Expressiveness wall"** (Framing 5)
-- "Physical separation limits which policies can be expressed, not just how they execute."
-- ✓ Connects directly to agent story (agents limited by interface, not search quality); most natural P2 partner for P1-B.
-- ✗ "Expressiveness" has a precise meaning in PL (language expressiveness relative to formal model) — a PL-literate reviewer will note you're using it loosely.
-- ✗ "Wall" implies a cliff, but data shows a slope (L1=2.60x, L2=3.29x, L3=more). No discontinuity.
-- Note: The "richer return type" counter is weak — pushing async DMA descriptors, uprobe registrations, and device bytecode into a return struct constructs our system under a different name. A synchronous callback genuinely cannot initiate a ms-scale DMA and wait for completion. The expressiveness limit is real, though "wall" overstates its sharpness.
-
-**P2-D: "Cross-layer fragmentation"** (Framing 6)
-- "Effective GPU policy requires information and control that no single layer possesses."
-- ✓ Most architecturally honest — correctly identifies policy is scattered, not just in driver.
-- ✗ Generic — applies to networking (app/socket/TC/NIC), storage (app/FS/block/FTL), every layered system. What's GPU-specific? This is the fatal flaw.
-- ✗ "Cross-layer" slightly overstates: the system IS genuinely cross-layer (host driver hooks + uprobes on application APIs + device-side BPF span three layers), but the driver is the clear coordination center. Better framing: "driver-coordinated cross-layer system" than "cross-layer framework."
+- ✓ Sharp tension between high impact and zero programmability; honest if contribution is primarily engineering.
+- ✗ Complaint about vendor practice, not architectural insight — "so convince NVIDIA to open-source the driver" (they already have).
+- ✗ Generic "make X extensible" template — doesn't distinguish from every other eBPF paper.
 
 **P2-E: "Driver not extensible"** (Framing 7, 8)
 - "The GPU driver is the only component with visibility + privilege + fault path — yet its policies remain hardcoded."
-- ✓ Honest, sets correct expectations if the paper is positioned as systems-building (like Bento or XRP).
-- ✗ Not "unattackable" — reviewer can say "NVIDIA open-sourced the modules, contribute upstream" or "this is engineering, not research."
-- ✗ Invites "just apply sched_ext" dismissal — if the problem is "driver not extensible" and sched_ext showed how to make kernel subsystems extensible, the contribution is "known pattern applied to new domain." P3b/P4 must preempt this by showing WHY direct application fails.
+- ✓ Honest, sets correct expectations for systems-building paper (like Bento or XRP).
+- ✗ Reviewer can say "NVIDIA open-sourced the modules, contribute upstream" or "this is engineering, not research."
+- ✗ Invites "just apply sched_ext" dismissal — P3b/P4 must preempt by showing WHY direct application fails.
 
-**P2-F: "Requirements + tradeoff"** (Current tex before latest edit)
+**P2-F: "Requirements + tradeoff"**
 - "Safe iterative exploration requires deployability, visibility, containment. No existing approach provides all three."
-- ✓ Best framing for organizing a related-work comparison table (define axes, show gaps).
-- ✗ Requirements are post-hoc — designed so only your system satisfies them. Reviewer asks "if I add module hot-reload to Forest, does it satisfy deployability?"
-- ✗ "Requirements list" is a red flag signaling "we designed a checklist and checked it off" rather than discovering something surprising.
+- ✓ Best for organizing a related-work comparison table.
+- ✗ Post-hoc requirements — designed so only your system satisfies them.
+- ✗ "Requirements list" red flag: "we designed a checklist and checked it off."
 
-**P2-G: "Architectural barrier"** (Current tex latest edit)
-- "Policy must be driver-resident (visibility, privilege, fault path). But GPU is separate processor via PCIe — driver separated from effects in time, space, context. Limits expressiveness. Agents confined."
-- ✓ Most complete — derives WHY driver, explains physical separation, connects to agents.
-- ✗ Four arguments (why driver, physical separation, expressiveness, agent confinement) in one paragraph. No single argument gets enough space to land. Reader processes four claims in rapid succession and retains none.
-- ✓ **Best candidate for splitting into two paragraphs** — first derives "why driver," second explains "physical separation limits expressiveness."
+**P2-I: "GPU lacks extensibility other Linux subsystems have"**
+- "Linux has made CPU scheduling (sched_ext), networking (XDP/TC), storage (XRP) extensible — but GPU has no extensibility story."
+- ✓ Positions paper as filling a gap in Linux extensibility program; attractive to eBPF/Linux PC members.
+- ✗ "Gap-filling" framing weaker than "architectural insight"; reviewer says "the gap is obvious, what's the research?"
 
-**P2-H: "Impedance mismatch between policy timescales"** (NEW, suggested by opus)
-- "GPU resource management operates at multiple timescales simultaneously (μs fault handling, ms migration, s-level scheduling), and any single-timescale interface sacrifices performance at the others."
-- ✓ More precise than co-location — focuses on the specific technical mechanism that breaks synchronous callbacks.
-- ✗ Only captures the timescale dimension; doesn't explain information mismatch (app intent) or visibility mismatch (device state).
+**P2-J: "Gap + agent amplifier"** (NEW, 2026-03-30)
+- "No programmable OS extensibility interface exists for GPU policy — gap grows as agents evolve from config tuners to code writers."
+- Structure: (1) gap claim + agent amplifier, (2) fixed knobs not enough, (3) user-space not enough, (4) kernel mods not enough, (5) conclusion
+- ✓ Agent capability growth is the throughline connecting all "not enough" arguments — answers Q11 (why agents need kernel extensibility, not just knobs)
+- ✓ Each existing approach is evaluated against what agents actually need (programmability + safety + kernel-level visibility)
+- ✗ Still a gap-filling framing at core — "no interface exists" is a complaint. Insight depth comes from P4, not P2.
+- ✗ Ties P2 strongly to agents — if reviewer doesn't buy agent motivation, P2 also weakens
 
-**P2-I: "GPU lacks extensibility other Linux subsystems have"** (NEW, suggested by opus)
-- "Linux has made CPU scheduling (sched_ext), page cache (cache_ext), storage (XRP), networking (XDP/TC) extensible — but GPU, the most economically important subsystem, has no extensibility story."
-- ✓ Positions paper as filling an obvious gap in a well-established Linux research program; attractive to eBPF/Linux PC members.
-- ✗ Frames the contribution as "gap-filling" which is weaker than "architectural insight"; reviewer may say "the gap is obvious, what's the research?"
+**User critiques on P2 (yunwei37, 2026-03-30):**
+- "GPU resource management policy is coordinated in the kernel driver" overclaims — policy also exists in user-space (vLLM PagedAttention, DeepSpeed ZeRO, cudaMemAdvise, MPS, MIG, Paella, XSched). Driver is the coordination point, not the only policy location. Fixed: "policy is scattered across user-space frameworks, CUDA runtime, and the kernel driver, but the driver is the natural coordination point."
+- "OS extensibility interface" needs definition on first use — reader doesn't know what this means. Fixed: added appositive "one that allows verified policy code to be safely loaded into the driver at runtime without modifying its source."
+- P2 was too long when it included physical separation insight (which belongs in P4) AND detailed existing approaches. Fixed: removed physical separation from P2 (stays in P4 only), compressed existing approaches to 1 sentence each.
+
+**P2 is NOT settled.** Current candidates: P2-E+I (practical gap, no agent), P2-J (gap + agent amplifier). See Problem Statement section above for P2-J draft text. Current tex uses P2-J.
 
 ### P3 options: What's the starting point?
 
 **P3-A: Existing approaches → our insight** (Draft 1)
 - "User-space, driver mods, advisory eBPF all insufficient. Even richer callbacks would require fixed async engine."
-- ✓ The "richer callback" rebuttal anticipates the obvious reviewer objection ("just return DMA descriptors") and closes it preemptively.
-- ✗ Treats struct_ops as previous work being criticized — dishonest when the eval shows "L1: struct_ops advisory hooks (our system)." Reviewer who reads eval will feel deceived.
+- ✓ "Richer callback" rebuttal anticipates "just return DMA descriptors" objection.
+- ✗ Treats struct_ops as previous work — dishonest when eval shows "L1: struct_ops (our system)."
 
 **P3-B: struct_ops = our starting point** (Draft 3, Current tex)
 - "eBPF struct_ops proven for CPU. We adopt synchronous advisory hooks as our starting point."
-- ✓ Correctly positions struct_ops as OUR foundation; the "we adopt it → but it's not enough" handoff to P3b/P4 is clean and follows the proven pattern of incremental design justification.
-- ✗ Loses the "richer callback" rebuttal from P3-A — reviewer can still ask "why not just return DMA descriptors?" and the intro doesn't preempt this.
-- ✗ Transition must be very tight — any gap between "we adopt" and "it's insufficient" makes reader wonder why you adopted something broken.
+- ✓ Correctly positions struct_ops as OUR foundation; clean "we adopt → but insufficient" handoff.
+- ✗ Jumps directly to struct_ops without establishing eBPF as the right tool first.
+- ✗ Loses "richer callback" rebuttal.
 
-**P3 is mostly settled:** P3-B with existing approaches as supporting detail. Consider adding one sentence from P3-A's "richer callback" rebuttal to close the obvious counter-argument.
+**P3-C: eBPF first → struct_ops → but insufficient** (NEW, 2026-03-30)
+- Thesis: "We propose treating GPU resource management as a programmable OS subsystem, using eBPF to provide the safety and programmability that existing approaches lack."
+- P3a: eBPF is the right tool — verified safety, arbitrary programmability, kernel-level, runtime deployable. Linux has proven this for CPU scheduling (sched_ext), networking (XDP/TC), storage (XRP).
+- P3b: For GPU, we adopt the struct_ops pattern — synchronous advisory hooks in the driver, as sched_ext does for CPU scheduling. This is our starting point.
+- P3c: But synchronous callbacks are insufficient — async path adds +27%, proactive further reduces P99. A richer callback returning DMA descriptors would reconstruct our system under a different name — the issue is not the return type but that policy effects outlive the callback.
+- ✓ Logical progression: eBPF (general tool) → struct_ops (specific pattern) → adopt → insufficient. Reader follows each step.
+- ✓ Directly answers P2's gap: P2 says "need kernel-level + programmable + safe," P3 says "eBPF is exactly that."
+- ✓ Includes "richer callback" rebuttal from P3-A.
+- ✗ Three sub-paragraphs may be too much for one P3 section. Consider whether P3a+P3b can be one paragraph.
+
+**P3 candidate主旨句对比:**
+
+| | 主旨句 | 问题 |
+|--|--------|------|
+| A (current tex) | "GPU resource management requires an OS policy interface providing safe, flexible and transparent programmability" | Checklist 感，"we argue" 弱 |
+| B (eBPF first) | "eBPF — verified, programmable, runtime-deployable — is the natural mechanism to close this gap" | 直接回应 P2 gap |
+| C (thesis + eBPF) | "We propose treating GPU resource management as a programmable OS subsystem, using eBPF to provide the safety and programmability that existing approaches lack" | Thesis + tool 合一 |
+| D (pattern) | "Linux has already made CPU scheduling, networking, and storage extensible via eBPF; we extend this pattern to GPU" | 太像 gap-filling |
+
+**User critiques on P3 (yunwei37, 2026-03-30):**
+- Should NOT jump directly to struct_ops — need to first establish eBPF as the right tool. Logic: P2 eliminates knobs/user-space/kernel-mods → need kernel-level + programmable + safe → eBPF is exactly that → then narrow to struct_ops pattern.
+- Old P3 主旨句 "we argue that GPU resource management requires an OS policy interface" is a checklist, not a thesis. "We argue" is weak for SOSP.
+- P3-C (eBPF first) preferred: thesis → eBPF properties → CPU precedent (sched_ext) → struct_ops for GPU → but insufficient.
+
+**P3 is NOT settled.** Current candidates: P3-B (current tex), P3-C (eBPF first). P3-C preferred for logical completeness. Current tex uses P3-C.
 
 ### P4 options: What's the insight?
 
 **P4-A: Two root causes** (Draft 1)
 - "Timescale mismatch + information mismatch."
-- ✓ Sharp, memorable names; simplest option — two things to remember is better than three. More honest if device-side evidence is thin.
-- ✗ Two root causes for three mechanisms means one mechanism (device BPF) is unmotivated — will feel bolted on in eval.
-- ✗ "Information mismatch" conflates two genuinely different gaps: driver↔app (vertical, between layers) and host↔device (horizontal, across PCIe). These have different mechanisms, overheads, and evidence.
+- ✓ Sharp, memorable; simplest option.
+- ✗ Two causes for three mechanisms → device BPF unmotivated.
+- ✗ "Information mismatch" conflates driver↔app (vertical) and host↔device (horizontal).
 
 **P4-B: Three boundaries** (Draft 2, 3)
 - "Three execution boundaries: sync/async, driver/app, host/device."
-- ✓ Complete, clean 3→3 mapping; makes the paper easy to structure (each section = one boundary).
-- ✗ Three independently described boundaries without a unifying principle — reads as "three things that are hard about GPUs" rather than one deep insight with three manifestations.
-- ✗ Vulnerable to "taxonomy" dismissal: "The authors classify challenges into three categories. While correct, this classification does not constitute a contribution." Must prove boundaries are *surprising* (not obvious), *necessary* (can't solve without all three), and *sufficient* (all three does solve it).
+- ✓ Complete 3→3 mapping.
+- ✗ Taxonomy without unifying principle — "three things that are hard about GPUs."
+- ✗ Vulnerable to "taxonomy" dismissal.
 
-**P4-C: Co-location as root cause** (Framing 4)
+**P4-C: Co-location as root cause** (Framing 4) — *moved from old P2-B*
 - "GPU is PCIe-connected accelerator → breaks co-location assumption → three mismatches."
-- ✓ The most publishable insight — provides the causal principle that P4-B lacks; the sentence a championing reviewer will quote: "physical separation between host and accelerator breaks the co-location assumption underlying existing kernel extensibility frameworks."
-- ✓ Generalization to PCIe/CXL accelerators is a **strength** — SOSP reviewers value insights that extend beyond the tested platform. A well-reasoned prediction is expected, not penalized. The real risk is modest: "you haven't tested CXL, so the generalization is a hypothesis" — which is acceptable.
+- ✓ Most publishable insight — the sentence a championing reviewer quotes.
+- ✓ Generalization to PCIe/CXL is a strength, not a weakness.
 - ✗ Needs evidence to land — works after +27%/P99 data, feels asserted before it.
+- ✗ NUMA counter: easy to defend — NUMA is same processor with ~2-3x latency; GPU is different processor, different ISA, different address space, 1000x gap. Qualitative, not quantitative.
 
 **P4-D: Discovery** (Framing 7)
 - "We applied eBPF, measured +27%/P99 gap, found three root causes from physical separation."
-- ✓ Most honest and most credible for the agent story ("here is what the agent and we found").
-- ✗ "We tried and found" confuses methodology with contribution — SOSP papers present understanding gained, not process followed.
-- ✗ Undermines completeness: "Are there more mismatches you haven't discovered? Is the list complete, or just what you happened to encounter?" P4-C answers completeness; P4-D cannot.
+- ✓ Most honest for agent story.
+- ✗ Methodology vs contribution confusion — SOSP wants understanding, not process.
+- ✗ Undermines completeness.
 
-**P4-E: Expressiveness dimensions** (Framing 5)
-- "Three mismatches = three dimensions of the expressiveness wall."
-- ✓ Ties mismatches to agent story — each dimension truncates the reachable policy space.
-- ✗ Vulnerable to "rebuttal by construction": reviewer proposes a single rich callback returning a struct with DMA descriptors + uprobe requests + device bytecode — technically synchronous and single-layer. Your counter is that such a callback pushes all policy into the return type, making the driver a general-purpose interpreter (i.e., your system by another name). But P4-E as stated doesn't make this counter.
+**P4-E: Expressiveness wall** — *moved from old P2-C*
+- "Physical separation limits which policies can be expressed, not just how they execute."
+- ✓ Connects to agent story (interface, not search, is bottleneck).
+- ✗ "Expressiveness" loose PL term. "Wall" implies cliff, data shows slope.
+- Note: "Richer return type" counter is weak — constructs our system under a different name. Expressiveness limit is real, though "wall" overstates sharpness.
 
-**P4-F: "One insight, three manifestations"** (NEW, suggested by opus)
-- "Physical separation is one root cause. Three mismatches are its necessary consequences: when policy and effect are separated by a high-latency interconnect, the interface must provide async execution, cross-boundary information relay, and remote observation."
-- ✓ P4-C done right — single causal principle with three derived requirements, not three independent observations. Most principled and most defensible.
-- ✗ Requires tight writing to avoid feeling like P4-C restated. The "derived requirements" must feel like logical consequences, not just a relabeled list.
+**P4-F: "One insight, three manifestations"** (opus-suggested)
+- "Physical separation is one root cause. Three mismatches are its necessary consequences."
+- ✓ P4-C done right — single causal principle with derived requirements. Most principled.
+- ✗ Tight writing needed to avoid feeling like P4-C restated.
+
+**P4-G: Cross-layer fragmentation** — *moved from old P2-D*
+- "Effective GPU policy requires information and control that no single layer possesses."
+- ✓ Architecturally honest — policy is scattered.
+- ✗ Generic — applies to networking, storage, every layered system. Fatal flaw.
+
+**P4-H: Impedance mismatch** — *moved from old P2-H*
+- "GPU operates at multiple timescales simultaneously; any single-timescale interface sacrifices the others."
+- ✓ Precise technical mechanism that breaks sync callbacks.
+- ✗ Only captures timescale dimension; misses information and visibility.
+
+**P4-I: Architectural barrier (split)** — *moved from old P2-G*
+- "Physical separation limits expressiveness. Agents confined."
+- ✓ Most complete when split: first paragraph = why driver, second = physical separation.
+- ✗ Too dense as single paragraph — four arguments, none lands.
+
+**P4 is mostly settled:** P4-C/P4-F — co-location as root cause with three derived manifestations, placed AFTER P3b evidence.
 
 ### P5-P7: Stable across all framings
 
@@ -160,38 +288,48 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 
 ## Comparison Matrix
 
+### P2 (practical problem — no insight here)
+
+| | Honesty | SOSP risk |
+|--|---------|-----------|
+| P2-A "locked" | High | "complaint, not insight; generic eBPF template" |
+| P2-E "not extensible" | High | "engineering, just apply sched_ext" |
+| P2-F "requirements" | Medium | "post-hoc checklist" |
+| P2-I "extensibility gap" | High | "gap-filling, obvious" |
+| **P2-E+I (settled)** | **High** | **"practical + gap; insight in P4 preempts 'just apply sched_ext'"** |
+
+### P4 (insight — the core contribution)
+
 | | Insight depth | Agent fit | Honesty | SOSP risk |
 |--|--------------|-----------|---------|-----------|
-| P2-A "locked" | Low | None | High | "complaint, not insight" |
-| P2-B "co-location" | High | Low | High | "abstract, demands sched_ext knowledge; NUMA counter easy to defend" |
-| P2-C "expressiveness" | Medium-High | Strong | Medium | "loose PL term, slope not cliff; but expressiveness limit is real" |
-| P2-D "cross-layer" | Medium | Medium | Low | "generic, oversells design" |
-| P2-E "not extensible" | Low | Medium | High | "engineering, just apply sched_ext; not truly unattackable" |
-| P2-F "requirements" | Low | Strong | Medium | "post-hoc checklist, straw man risk" |
-| P2-G "architectural" | High | Strong | High | "too dense; **split into two paras**" |
-| P2-H "timescale impedance" | Medium-High | Low | High | "only captures one dimension" |
-| P2-I "extensibility gap" | Medium | Low | High | "gap-filling, obvious" |
-| | | | | |
 | P4-A "two causes" | Medium | None | High | "incomplete, conflates two gaps" |
 | P4-B "three boundaries" | Medium | None | High | "taxonomy without principle" |
-| P4-C "co-location root" | High | Low | High | "CXL untested but generalization is a strength, not weakness" |
-| P4-D "discovery" | Medium | Strong | Highest | "trial-and-error, completeness?" |
-| P4-E "expressiveness dims" | Medium-High | Strong | Medium | "rebuttal by construction" |
-| P4-F "one insight three manifestations" | High | Low | High | "must feel derived not relabeled; agent connection not inherent" |
+| P4-C "co-location root" | High | Low | High | "generalization is strength; needs evidence first" |
+| P4-D "discovery" | Medium | Strong | Highest | "methodology vs contribution" |
+| P4-E "expressiveness wall" | Medium-High | Strong | Medium | "loose PL term, slope not cliff" |
+| P4-F "one insight, three manifestations" | High | Low | High | "must feel derived not relabeled" |
+| P4-G "cross-layer" | Medium | Medium | Low | "generic, applies to every layered system" |
+| P4-H "timescale impedance" | Medium-High | Low | High | "only one dimension" |
+| P4-I "architectural barrier split" | High | Strong | High | "too dense as one para; split helps" |
+| **P4-C/F (settled)** | **High** | **Low** | **High** | **"co-location + derived manifestations, after P3b evidence"** |
 
 ---
 
-## Synthesis: Opus-recommended combination
+## Synthesis: Final combination (2026-03-30)
 
-**P1-B** (agent as full P1, but trimmed — 3 sentences establishing use case, not a full agent paragraph) + **P2-G split into two paragraphs** (first: why driver is the right place; second: physical separation limits expressiveness) + **P4-F** (one root cause → three derived manifestations, after evidence in P3b).
+**P1-C** (policy impact + agent in one sentence, light touch) + **P2-E+I** (driver not extensible + Linux extensibility gap, practical problem) + **P3-B** (struct_ops starting point + insufficient) + **P4-C/F** (co-location breaks → three derived manifestations, AFTER P3b evidence)
 
 Reasoning:
-- P1-B provides "why now" (agents + open-source GPU drivers are both new in 2026); P1-A was writable in 2020.
-- P2-G split gives the deepest problem statement without density; the co-location insight is earned, not front-loaded.
-- P4-F is the most principled insight — single causal root (physical separation via PCIe) with three necessary consequences.
-- P1-B's framing debt (agent eval expectations) is payable: 59 configs, 50 safety events, 0 panics is a respectable case study.
+- P1-C: agent eval is modest (59 configs, no rigorous ablation), so lighter touch avoids P1-B's framing debt while providing "why now."
+- P2-E+I: honest practical problem, no insight overclaim. Insight stays in P4 where it's earned by P3b evidence.
+- P3-B: struct_ops is OUR starting point, not previous work. "But insufficient" with evidence sets up P4.
+- P4-C/F: co-location is the deepest insight, placed after evidence (+27%, P99) so it feels discovered, not asserted.
 
-**Key principle:** Evidence before explanation. Discovery before derivation. Honest about what we found, not what we "argue."
+**Key principle:** P2 = practical problem (honest), P4 = architectural insight (earned). Evidence before explanation.
+
+Previous opus recommendation (P1-B + P2-G split + P4-F) was rejected because:
+- P1-B creates framing debt the eval can't pay
+- P2-G front-loads insight before evidence, creating redundancy with P4
 
 ---
 
