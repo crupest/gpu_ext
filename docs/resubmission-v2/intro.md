@@ -1,13 +1,18 @@
 # GPU_ext Intro: Framings, Analysis & Plan
 
-## Documents
+## Key Observations (what we see)
 
-| File | Content |
-|------|---------|
-| `intro_draft.md` | Draft 1: Two root causes (timescale + information mismatch) |
-| `intro_draft2.md` | Draft 2: Three execution boundaries (sync/async, driver/app, host/device) |
-| `intro_draft3.md` | Draft 3: Agent motivation + three boundaries |
-| `../paper/tex/intro.tex` | Current working LaTeX (being edited) |
+1. GPU resource management policies have large, workload-dependent performance impact (up to 73% of execution time).
+2. The GPU driver is the only layer with global visibility, hardware privilege and cross-tenant authority — the only viable coordination point for policy.
+3. Synchronous advisory hooks (struct_ops L1) achieve 2.60x, but async (L2) adds +27% and proactive (L3) further reduces P99 — each layer adds non-redundant value.
+4. AI agents are actively exploring system-level policies, and GPU is a high-value target but lacks a safe, deployable OS interface for such exploration.
+5. SIMT execution on GPU requires distinguishing warp-uniform from lane-varying values — a standard eBPF verifier cannot ensure safety on GPU hardware.
+
+## Key Insights (why it's so)
+
+1. GPU is a separate processor across PCIe — this physical separation breaks the co-location assumption (policy, information, effect in one context) that makes CPU extensibility frameworks (sched_ext, cache_ext) work.
+2. Three mismatches (timescale, information, visibility) are derived consequences of physical separation, not independent problems — each requires a distinct mechanism to cross.
+3. No single-layer callback model can express the policies that account for the +27% and P99 gains — the interface, not the search, is the bottleneck.
 
 ---
 
@@ -33,8 +38,9 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 **P1-C: Policy + agent in one sentence** (Current tex)
 - "GPU policies have large impact, and AI agents are actively optimizing such policies across the stack."
 - ✓ Compact — establishes both themes without over-committing to either.
-- ✗ **Strictly dominated** — pays the cost of mentioning agents (inviting "AI for systems" reviewer expectations) without getting the benefit (natural motivation for safety/dynamism/iteration). Either commit (P1-B) or drop (P1-A); half-measures are worse than either extreme.
-- ✗ Creates tonal mismatch — P1 says "agents actively optimizing" but P2-P5 never mention agents again until one sentence in eval. Reader experiences disconnect between marketing and substance.
+- ✓ If agent eval is modest (59 configs, no rigorous ablation), P1-C's lighter touch avoids P1-B's framing debt while still providing "why now." P1-C is the **best option when the paper cannot pay off P1-B's promise.**
+- ✗ If agent threads through P2-P6 (as the throughline table suggests), P1-C under-leverages the agent story. If agents disappear after P1, creates tonal mismatch. Outcome depends on how consistently agent appears in subsequent paragraphs.
+- ✗ Compared to P1-B, gives up the natural motivation for safety/dynamism/iteration from a single use case — these must be motivated separately.
 
 ### P2 options: What's the problem?
 
@@ -48,25 +54,26 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 - "Unlike CPU where policy/information/effect co-located, GPU spans a physical boundary via PCIe."
 - ✓ Deepest insight — contrastive with CPU extensibility, explains WHY struct_ops fails, predictive for any PCIe/CXL accelerator. The only framing that makes the paper about more than GPUs.
 - ✗ Demands reader familiarity with sched_ext/cache_ext internals; if the reader doesn't know how those work, the comparison falls flat.
-- ✗ CPU scheduling is not perfectly co-located either (NUMA, remote memory) — reviewer can argue the difference is quantitative (μs vs ms), not qualitative. You must defend why 1000x gap is qualitatively different.
+- ✗ NUMA counter: CPU scheduling involves remote memory with variable latency. However, this counter is **easy to defend** — NUMA is the same processor with ~2-3x latency variation; GPU is a different processor, different ISA, different address space, different execution model, across PCIe with 1000x latency gap. The difference is qualitative (separate processor), not just quantitative (longer latency).
 
 **P2-C: "Expressiveness wall"** (Framing 5)
 - "Physical separation limits which policies can be expressed, not just how they execute."
 - ✓ Connects directly to agent story (agents limited by interface, not search quality); most natural P2 partner for P1-B.
 - ✗ "Expressiveness" has a precise meaning in PL (language expressiveness relative to formal model) — a PL-literate reviewer will note you're using it loosely.
-- ✗ You show synchronous callbacks are *inconvenient* for cross-block prefetch, not *inexpressible* — a sufficiently rich return type (DMA descriptor list) might express it. The real claim is that execution strategy is policy-dependent, which is weaker than inexpressibility.
 - ✗ "Wall" implies a cliff, but data shows a slope (L1=2.60x, L2=3.29x, L3=more). No discontinuity.
+- Note: The "richer return type" counter is weak — pushing async DMA descriptors, uprobe registrations, and device bytecode into a return struct constructs our system under a different name. A synchronous callback genuinely cannot initiate a ms-scale DMA and wait for completion. The expressiveness limit is real, though "wall" overstates its sharpness.
 
 **P2-D: "Cross-layer fragmentation"** (Framing 6)
 - "Effective GPU policy requires information and control that no single layer possesses."
 - ✓ Most architecturally honest — correctly identifies policy is scattered, not just in driver.
-- ✗ Generic — applies to networking (app/socket/TC/NIC), storage (app/FS/block/FTL), every layered system. What's GPU-specific?
-- ✗ Contradicts the paper's own design: gpu_ext is a driver-centric system with uprobes and device BPF as extensions, not a genuinely cross-layer framework. "Cross-layer" rhetoric oversells.
+- ✗ Generic — applies to networking (app/socket/TC/NIC), storage (app/FS/block/FTL), every layered system. What's GPU-specific? This is the fatal flaw.
+- ✗ "Cross-layer" slightly overstates: the system IS genuinely cross-layer (host driver hooks + uprobes on application APIs + device-side BPF span three layers), but the driver is the clear coordination center. Better framing: "driver-coordinated cross-layer system" than "cross-layer framework."
 
 **P2-E: "Driver not extensible"** (Framing 7, 8)
 - "The GPU driver is the only component with visibility + privilege + fault path — yet its policies remain hardcoded."
-- ✓ Honest, unattackable, sets correct expectations if the paper is positioned as systems-building (like Bento or XRP).
-- ✗ Invites "just apply sched_ext" dismissal — if the problem is "driver not extensible" and sched_ext showed how to make kernel subsystems extensible, the contribution is "known pattern applied to new domain."
+- ✓ Honest, sets correct expectations if the paper is positioned as systems-building (like Bento or XRP).
+- ✗ Not "unattackable" — reviewer can say "NVIDIA open-sourced the modules, contribute upstream" or "this is engineering, not research."
+- ✗ Invites "just apply sched_ext" dismissal — if the problem is "driver not extensible" and sched_ext showed how to make kernel subsystems extensible, the contribution is "known pattern applied to new domain." P3b/P4 must preempt this by showing WHY direct application fails.
 
 **P2-F: "Requirements + tradeoff"** (Current tex before latest edit)
 - "Safe iterative exploration requires deployability, visibility, containment. No existing approach provides all three."
@@ -122,8 +129,8 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 **P4-C: Co-location as root cause** (Framing 4)
 - "GPU is PCIe-connected accelerator → breaks co-location assumption → three mismatches."
 - ✓ The most publishable insight — provides the causal principle that P4-B lacks; the sentence a championing reviewer will quote: "physical separation between host and accelerator breaks the co-location assumption underlying existing kernel extensibility frameworks."
+- ✓ Generalization to PCIe/CXL accelerators is a **strength** — SOSP reviewers value insights that extend beyond the tested platform. A well-reasoned prediction is expected, not penalized. The real risk is modest: "you haven't tested CXL, so the generalization is a hypothesis" — which is acceptable.
 - ✗ Needs evidence to land — works after +27%/P99 data, feels asserted before it.
-- ✗ Claims generalization to all PCIe/CXL accelerators but paper tests only NVIDIA GPUs — reviewer says "speculative generalization."
 
 **P4-D: Discovery** (Framing 7)
 - "We applied eBPF, measured +27%/P99 gap, found three root causes from physical separation."
@@ -156,10 +163,10 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 | | Insight depth | Agent fit | Honesty | SOSP risk |
 |--|--------------|-----------|---------|-----------|
 | P2-A "locked" | Low | None | High | "complaint, not insight" |
-| P2-B "co-location" | High | Medium | High | "abstract, demands sched_ext knowledge" |
-| P2-C "expressiveness" | Medium-High | Strong | Medium | "loose PL term, slope not cliff" |
+| P2-B "co-location" | High | Low | High | "abstract, demands sched_ext knowledge; NUMA counter easy to defend" |
+| P2-C "expressiveness" | Medium-High | Strong | Medium | "loose PL term, slope not cliff; but expressiveness limit is real" |
 | P2-D "cross-layer" | Medium | Medium | Low | "generic, oversells design" |
-| P2-E "not extensible" | Low | Medium | Highest | "engineering, just apply sched_ext" |
+| P2-E "not extensible" | Low | Medium | High | "engineering, just apply sched_ext; not truly unattackable" |
 | P2-F "requirements" | Low | Strong | Medium | "post-hoc checklist, straw man risk" |
 | P2-G "architectural" | High | Strong | High | "too dense; **split into two paras**" |
 | P2-H "timescale impedance" | Medium-High | Low | High | "only captures one dimension" |
@@ -167,10 +174,10 @@ Differences concentrate in P1, P2, P3, P4. P5-P7 are stable across all framings.
 | | | | | |
 | P4-A "two causes" | Medium | None | High | "incomplete, conflates two gaps" |
 | P4-B "three boundaries" | Medium | None | High | "taxonomy without principle" |
-| P4-C "co-location root" | High | Medium | High | "speculative generalization" |
+| P4-C "co-location root" | High | Low | High | "CXL untested but generalization is a strength, not weakness" |
 | P4-D "discovery" | Medium | Strong | Highest | "trial-and-error, completeness?" |
 | P4-E "expressiveness dims" | Medium-High | Strong | Medium | "rebuttal by construction" |
-| P4-F "one insight three manifestations" | High | Medium | High | "must feel derived not relabeled" |
+| P4-F "one insight three manifestations" | High | Low | High | "must feel derived not relabeled; agent connection not inherent" |
 
 ---
 
