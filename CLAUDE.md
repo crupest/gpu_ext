@@ -104,6 +104,12 @@ codex exec --dangerously-bypass-approvals-and-sandbox -C /path/to/dir "your prom
 - **Experiments → Agent tool** (must be serial, one at a time)
 - **Always give subagents/codex complete context**: file paths, function signatures, constraints, expected output format.
 
+### Paper Writing
+
+- When writing or reviewing paper text (LaTeX), follow the paper-writing skill at `.claude/skills/paper-writer.md`.
+- This includes hard rules from co-author (arq) reviews, anti-patterns identified during resubmission, and self-review questions.
+- Key rules: no em-dashes, no "our" for prior work (double-blind), one idea per paragraph, evidence before explanation.
+
 ### Paper Reproduction
 
 All experiments must match the paper's configuration (models, dataset sizes, number of trials). Software versions use whatever is locally installed/built from source — do not pin to specific versions.

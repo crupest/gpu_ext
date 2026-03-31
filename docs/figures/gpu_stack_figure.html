@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: 800px 660px; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    background: white;
+    padding: 20px;
+    width: 800px;
+  }
+
+  .section-label { font-size: 24px; font-weight: bold; margin-bottom: 6px; }
+  .user-label { color: #1d4ed8; }
+  .apps-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .app-box {
+    border: 3px solid #60a5fa;
+    border-radius: 8px;
+    padding: 8px 6px;
+    background: #eff6ff;
+    text-align: center;
+  }
+  .app-name { font-size: 22px; font-weight: 600; }
+  .cuda-tag {
+    border: 2px solid #a78bfa;
+    border-radius: 5px;
+    padding: 1px 8px;
+    background: #ede9fe;
+    font-size: 16px;
+    color: #7c3aed;
+    margin-top: 4px;
+    display: inline-block;
+  }
+
+  .arrow { text-align: center; color: #9ca3af; font-size: 20px; margin: 8px 0; }
+
+  .driver-box {
+    border: 3px solid #22c55e;
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: #f0fdf4;
+  }
+  .driver-label { font-size: 24px; font-weight: bold; color: #15803d; text-align: center; margin-bottom: 8px; }
+  .driver-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .driver-item {
+    border: 2px solid #86efac;
+    border-radius: 6px;
+    padding: 6px;
+    background: white;
+    text-align: center;
+    font-size: 20px;
+  }
+
+  .boundary {
+    display: flex;
+    align-items: center;
+    margin: 10px 0;
+    gap: 6px;
+  }
+  .boundary-side { font-size: 18px; color: #6b7280; font-weight: 600; }
+  .boundary-line { flex: 1; border-top: 3px dashed #9ca3af; }
+  .boundary-label {
+    font-size: 18px;
+    color: #6b7280;
+    padding: 0 10px;
+    background: white;
+  }
+
+  .device-box {
+    border: 3px solid #f97316;
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: #fff7ed;
+  }
+  .device-label { font-size: 24px; font-weight: bold; color: #c2410c; text-align: center; margin-bottom: 8px; }
+  .device-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .device-item {
+    border: 2px solid #fdba74;
+    border-radius: 6px;
+    padding: 6px;
+    background: white;
+    text-align: center;
+    font-size: 20px;
+  }
+  .sm-box {
+    border: 2px solid #fdba74;
+    border-radius: 6px;
+    padding: 8px;
+    background: white;
+    margin-bottom: 8px;
+  }
+  .sm-label { font-size: 16px; color: #ea580c; text-align: center; margin-bottom: 6px; }
+  .sm-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .sm-item {
+    border: 2px solid #fed7aa;
+    border-radius: 4px;
+    padding: 3px 6px;
+    background: #fff7ed;
+    text-align: center;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+
+  <div class="section-label user-label">User Space</div>
+  <div class="apps-grid">
+    <div class="app-box"><div class="app-name">vLLM</div><div class="cuda-tag">CUDA</div></div>
+    <div class="app-box"><div class="app-name">PyTorch</div><div class="cuda-tag">CUDA</div></div>
+    <div class="app-box"><div class="app-name">Faiss</div><div class="cuda-tag">CUDA</div></div>
+    <div class="app-box"><div class="app-name">TensorRT</div><div class="cuda-tag">CUDA</div></div>
+  </div>
+
+  <div class="arrow">&#8595; ioctl / mmap &#8595;</div>
+
+  <div class="driver-box">
+    <div class="driver-label">Kernel Driver</div>
+    <div class="driver-grid">
+      <div class="driver-item">UVM</div>
+      <div class="driver-item">Channel</div>
+      <div class="driver-item">MMU</div>
+    </div>
+  </div>
+
+  <div class="boundary">
+    <div class="boundary-side">CPU &#8593;</div>
+    <div class="boundary-line"></div>
+    <div class="boundary-label">PCIe / NVLink</div>
+    <div class="boundary-line"></div>
+    <div class="boundary-side">&#8595; GPU</div>
+  </div>
+
+  <div class="device-box">
+    <div class="device-label">GPU Device</div>
+    <div class="device-row">
+      <div class="device-item">Firmware</div>
+      <div class="device-item">HW Scheduler</div>
+    </div>
+    <div class="sm-box">
+      <div class="sm-label">Streaming Multiprocessors (SMs)</div>
+      <div class="sm-grid">
+        <div class="sm-item">SM0</div>
+        <div class="sm-item">SM1</div>
+        <div class="sm-item">...</div>
+        <div class="sm-item">SMn</div>
+      </div>
+    </div>
+    <div class="device-row">
+      <div class="device-item">HBM / VRAM</div>
+      <div class="device-item">L2 Cache</div>
+    </div>
+  </div>
+
+</body>
+</html>

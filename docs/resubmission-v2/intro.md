@@ -112,17 +112,17 @@ A GPU policy framework must jointly consider memory management and compute sched
 |-------|----------|----------|
 | Timescale "too short" (L2 async) | GNN: L1 2.60x → L1+L2 3.36x (+27%) | Strong (one workload) |
 | Timescale "too late" (L3 uprobes) | vLLM: L1+L3 P99 -9.5% | Moderate (one workload, modest effect) |
-| Information (device-side BPF) | Instrumentation with low overhead | Weak (instrumentation only, no end-to-end policy gain) |
+| Information (device-side BPF) | Device-side work-stealing scheduler; instrumentation with low overhead (3-14% vs NVBit 85-87%) | Moderate (device-side BPF used in e2e policies including work-stealing scheduler and observability; overhead comparison to NVBit is strong) |
 | Memory-scheduling coupling | GNN: eviction policy (memory) affects training throughput (scheduling) | Moderate (indirect) |
 | Agent code generation | ALL 59 policies are agent-written; 2.60x/3.36x/P99 results are from agent code | Strong (agent IS the policy developer, not compared to human baseline) |
 | Limitation at high oversub | llama.cpp 1.84x: L2/L3 negligible, PCIe saturated | Strong (honest negative) |
 
-**Honest assessment:** Our experiments strongly support timescale mismatch (L2 async). They moderately support timescale "too late" (L3 uprobes). They weakly support information mismatch (device-side BPF is instrumentation-only, no end-to-end policy uses it). The memory-scheduling coupling claim is supported indirectly (eviction policy affects scheduling), not by a controlled experiment comparing unified vs separate hooks. ALL performance results (2.60x, 3.36x, P99 -9.5%) are from agent-written BPF policies, demonstrating that agent + gpu_ext produces effective policies end-to-end.
+**Honest assessment:** Our experiments strongly support timescale mismatch (L2 async). They moderately support timescale "too late" (L3 uprobes). They moderately support information mismatch (device-side BPF is used in end-to-end policies including work-stealing scheduler; overhead is dramatically lower than NVBit). The memory-scheduling coupling claim is supported indirectly (eviction policy affects scheduling), not by a controlled experiment comparing unified vs separate hooks. ALL performance results (2.60x, 3.36x, P99 -9.5%) are from agent-written BPF policies, demonstrating that agent + gpu_ext produces effective policies end-to-end.
 
 **Gaps between claims and evidence:**
-- No experiment shows addressing BOTH mismatches simultaneously on one workload
+- No experiment shows addressing ALL challenges simultaneously on one workload
 - No experiment compares unified fault-handler hooks vs separate memory/scheduling hooks
-- Device-side BPF has no end-to-end performance result
+- Device-side BPF is used in e2e policies (work-stealing scheduler) but the information challenge's contribution to host-side policy improvement is not isolated in a controlled experiment
 
 **Risk:** Two mismatches may feel "less" than three. Counter: SOSP values depth over breadth. Two well-derived mismatches from clear root causes are stronger than three with questionable independence.
 
@@ -158,7 +158,7 @@ The GPU is a discrete processor. Policy decisions in the host driver must take e
 **Opus reviewer critique of V4-draft (two root causes version) and how V4-final addresses it:**
 - "Coupling requires an unstated third root cause (limited device memory)" → FIXED: limited device memory is now an explicit, first-class hardware fact.
 - "Proactive is not purely timescale; requires predictability" → ACKNOWLEDGED: proactive requires both slowness (necessary) and workload structure (possible). Noted but not separated — timescale creates the need, workload structure enables the solution.
-- "Information mismatch lacks experimental backing" → KNOWN: device-side BPF is observability-only, no end-to-end performance result.
+- "Information mismatch lacks experimental backing" → ADDRESSED: device-side BPF is used in e2e policies (work-stealing scheduler, combined host-device prefetch 1.77x, xCoord observation feedback loop). Device-side BPF is a headline contribution, not auxiliary.
 - "If device memory were infinite, coupling disappears" → YES: this confirms limited device memory is a separate fact, not a sub-case of data movement.
 
 [Review: opus review completed, V4 updated to address critique]
