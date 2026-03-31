@@ -128,7 +128,40 @@ A GPU policy framework must jointly consider memory management and compute sched
 
 [Review: `reviews/opus_review_mismatches_v3.md` — V3 is borderline accept, fix upward info attribution + promote fault-handler nexus]
 
-[Review: `reviews/opus_review_mismatches_v3.md` — V3 is borderline accept, fix upward info attribution + promote fault-handler nexus]
+### Version 4: Three hardware facts, three challenges (2026-03-31)
+
+The GPU is a discrete processor. Policy decisions in the host driver must take effect on a separate device. Unlike CPU extensibility where policy and managed resources share the same processor, GPU policy must cross a device boundary. Three hardware facts about this separation create three challenges for extensibility:
+
+**Three hardware facts → three challenges:**
+
+1. **Separate memory** (GPU computation requires data in device-local memory; getting data there requires physical transfer across the interconnect)
+   → **Timescale challenge**: cross-device operations (migrating data, dispatching commands) take milliseconds, too slow for synchronous callbacks and too costly for purely reactive decisions. Both "async" (effects outlive the callback) and "proactive" (act before the trigger) are consequences of the same fact: cross-device operations are slow.
+   → Mechanism: async sleepable kfuncs + bpf_wq (effects that outlive the callback), uprobes on CUDA APIs (act before faults).
+
+2. **Limited device memory** (device memory cannot hold all data; bandwidth is shared and finite)
+   → **Coupling challenge**: memory placement and compute scheduling compete for the same constrained device resources, making them interdependent. Decisions about data placement directly determine which workloads can execute. On CPU, sched_ext and cache_ext operate independently; on GPU, this independence does not hold.
+   → Mechanism: hooks in the fault handler (the memory-scheduling nexus), where a single BPF program sees both memory state and scheduling state.
+
+3. **Different architecture** (different ISA, different execution model; host cannot interpret device internal state)
+   → **Information challenge**: the GPU's internal execution state is opaque to the host without device-side instrumentation. This persists even with zero-latency interconnect or coherent shared memory.
+   → Mechanism: device-side BPF instrumentation + SIMT-aware verifier.
+
+**Current tex P4 (compressed intro version):**
+> "However, the GPU is a discrete processor with its own execution model and resources, and policy decisions in the host driver must take effect on a separate device, making direct application of the CPU model insufficient: cross-device operations like migrating data or dispatching commands take milliseconds, too slow for synchronous callbacks and too costly for purely reactive decisions. Limited device memory and bandwidth further couple memory and scheduling, as decisions about data placement directly determine which workloads can execute. Finally, the GPU's distinct architecture makes its internal execution state opaque to the host without device-side instrumentation."
+
+**What changed from V3:**
+- Moved from "two root causes, three manifestations" to "three hardware facts, three challenges" (1:1 mapping). Opus reviewer pointed out that coupling requires an unstated third root cause (limited device memory) — hiding it inside "root cause A + limited device memory" was dishonest. Three-to-three is cleaner.
+- "Too short" and "too late" merged into one challenge (timescale): both are consequences of "cross-device operations are slow."
+- Memory-scheduling coupling promoted from "design implication" to explicit challenge with its own hardware fact (limited device memory).
+- Each hardware fact is a concrete property of discrete GPUs. Each challenge maps to exactly one fact. No taxonomy padding.
+
+**Opus reviewer critique of V4-draft (two root causes version) and how V4-final addresses it:**
+- "Coupling requires an unstated third root cause (limited device memory)" → FIXED: limited device memory is now an explicit, first-class hardware fact.
+- "Proactive is not purely timescale; requires predictability" → ACKNOWLEDGED: proactive requires both slowness (necessary) and workload structure (possible). Noted but not separated — timescale creates the need, workload structure enables the solution.
+- "Information mismatch lacks experimental backing" → KNOWN: device-side BPF is observability-only, no end-to-end performance result.
+- "If device memory were infinite, coupling disappears" → YES: this confirms limited device memory is a separate fact, not a sub-case of data movement.
+
+[Review: opus review completed, V4 updated to address critique]
 
 ## Design Constraints (these shape the implementation)
 
