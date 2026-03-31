@@ -1176,8 +1176,30 @@ The simplest visual showing the model difference.
     all transitions lifecycle-bounded
 ```
 
+### Evolution 7: Terminology refinement — "effects", "triggers", "direct" (2026-03-31, latest)
+
+**"kfuncs" in the intro**: Early versions said "via kfuncs" in P4b. This is implementation detail for the intro. Changed to "via effects" — abstract enough for intro, design section explains that effects = kfunc calls.
+
+**"side effects" considered and rejected**: "Side effects" is technically accurate (BPF programs produce effects during execution, not via return values). But in systems context "side effect" implies "unintended/accidental," which contradicts "intentional policy action." "Via effects" is cleaner, no PL baggage.
+
+**"decouple decisions from the transitions they direct" → "decoupling triggers from their effects"**: Original phrase was circular — "decisions direct transitions but are decoupled from them?" Reader confusion. "Triggers from effects" is cleaner: trigger = where BPF runs, effect = what lifecycle transition is directed. No circularity.
+
+**"To ensure safety, policies can..." → "To ensure safety, policies only..."**: "Can" sounds like permission; "only" sounds like constraint. The safety point is about what policies CANNOT do, framed positively.
+
+**Current P4b in intro.tex (after all refinements):**
+
+> \sys{} models GPU resource management as programmable lifecycles, where verified BPF programs direct transitions such as memory eviction, prefetch, and compute preemption via effects. Unlike current policy interfaces such as sched_ext, cache_ext and XDP, where each callback makes one synchronous decision at one transition point, \sys{} programs can direct multiple transitions asynchronously from any trigger in the management stack, decoupling triggers from their effects. To ensure safety, policies only influence which transitions occur and when, but cannot create invalid transitions or violate resource invariants. \sys{} extends this model to the GPU itself, where a SIMT-aware verifier enables verified BPF to run on GPU hardware for observation and policy execution.
+
+**Key terminology settled:**
+- **"direct"** — what BPF programs do to lifecycle transitions (ordering, timing, selection)
+- **"effects"** — the lifecycle operations BPF programs produce (eviction, prefetch, preemption). In implementation = kfunc calls, but intro uses abstract "effects"
+- **"triggers"** — where/when BPF programs are invoked (fault, uprobe, device event, bpf_wq)
+- **"decoupling triggers from effects"** — the core model property distinguishing gpu_ext from sched_ext
+- **"lifecycle-bounded"** — effects can only direct valid transitions (safety)
+
 ### Open questions (latest)
 1. Is "direct" the right verb? Alternatives: steer, guide, influence. "Direct" chosen for precision — active guidance without full control, common in systems terminology.
 2. Does "decoupled from transition points" accurately describe what sched_ext CANNOT do? sched_ext's `enqueue()` can call helpers that affect other parts of the scheduler — is that also "decoupled"? Answer: partially. sched_ext helpers affect the same lifecycle synchronously from the same transition point. gpu_ext's decoupling is stronger: different trigger, different transition, async execution.
 3. The acid test examples now use `bpf_kfunc_set_eviction_priority()` instead of return values. Is this consistent with the actual implementation? Implementation still uses struct_ops return values. Paper should note: "implementation uses struct_ops return values as a convenience; conceptually equivalent to the kfunc pattern."
 4. Which figure(s) to use in paper? Figure A (model), B (coupling), and/or C (contrast)?
+5. Implementation can be changed to match the model (make eviction ordering also go through kfuncs instead of return values). Not a fundamental concern.
