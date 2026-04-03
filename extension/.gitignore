@@ -51,3 +51,4 @@ test_uprobe_preempt
 test_priority_demo
 test_cuda_launch
 test_timeslice_policy.py
+uprobe_preempt_multi
